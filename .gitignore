@@ -10,3 +10,7 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# Firebase / Google service credentials
+GoogleService-Info.plist
+**/GoogleService-Info.plist
