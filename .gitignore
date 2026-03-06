@@ -1,0 +1,12 @@
+# Swift Package Manager local/build caches
+.spm-cache/
+.build/
+LogicTestsPackage/.build/
+
+# Xcode user/build artifacts
+DerivedData/
+*.xcuserstate
+**/xcuserdata/
+
+# macOS
+.DS_Store
