@@ -1,11 +1,100 @@
 import SwiftUI
 import WidgetKit
 import AppIntents
+import ActivityKit
+
+struct AlarmActivityAttributes: ActivityAttributes {
+    public struct ContentState: Codable, Hashable {
+        var scheduleTitle: String
+        var scheduledTime: Date
+        var isSnoozing: Bool
+        var snoozeUntil: Date?
+        var elapsedSeconds: Int
+    }
+
+    var scheduleID: String
+    var alarmSoundName: String
+}
 
 @main
 struct AlarmWidgetBundle: WidgetBundle {
     var body: some Widget {
         AlarmStatusWidget()
+        if #available(iOSApplicationExtension 16.1, *) {
+            AlarmLiveActivityWidget()
+        }
+    }
+}
+
+@available(iOSApplicationExtension 16.1, *)
+private struct AlarmLiveActivityWidget: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: AlarmActivityAttributes.self) { context in
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: context.state.isSnoozing ? "zzz" : "alarm.fill")
+                        .foregroundStyle(.red)
+                    Text(context.state.isSnoozing ? "Alarm Snoozed" : "Alarm Active")
+                        .font(.headline)
+                }
+
+                Text(context.state.scheduleTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+
+                if context.state.isSnoozing, let snoozeUntil = context.state.snoozeUntil {
+                    Text("Snoozed until \(snoozeUntil, style: .time)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Scheduled at \(context.state.scheduledTime, style: .time)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .activityBackgroundTint(Color.black.opacity(0.2))
+            .activitySystemActionForegroundColor(.white)
+        } dynamicIsland: { context in
+            DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    Image(systemName: context.state.isSnoozing ? "zzz" : "alarm.fill")
+                        .foregroundStyle(.red)
+                }
+
+                DynamicIslandExpandedRegion(.trailing) {
+                    Text(context.state.isSnoozing ? "Snoozed" : "Ringing")
+                        .font(.caption2.weight(.semibold))
+                }
+
+                DynamicIslandExpandedRegion(.center) {
+                    Text(context.state.scheduleTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+
+                DynamicIslandExpandedRegion(.bottom) {
+                    if context.state.isSnoozing, let snoozeUntil = context.state.snoozeUntil {
+                        Text("Until \(snoozeUntil, style: .time)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Alarm at \(context.state.scheduledTime, style: .time)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } compactLeading: {
+                Image(systemName: context.state.isSnoozing ? "zzz" : "alarm.fill")
+            } compactTrailing: {
+                Text(context.state.isSnoozing ? "ZZZ" : "ALM")
+                    .font(.caption2.weight(.semibold))
+            } minimal: {
+                Image(systemName: context.state.isSnoozing ? "zzz" : "alarm.fill")
+            }
+            .keylineTint(.red)
+        }
     }
 }
 
@@ -15,7 +104,7 @@ private struct AlarmEntry: TimelineEntry {
 }
 
 private struct AlarmProvider: TimelineProvider {
-    private static let appGroupID = "group.com.bittu.alart-routine"
+    private static let appGroupID = "group.com.bittu.Schedulr"
     private static let snapshotKey = "widget.scheduleSnapshot.v1"
 
     func placeholder(in context: Context) -> AlarmEntry {
@@ -93,7 +182,7 @@ private struct AlarmStatusWidget: Widget {
         StaticConfiguration(kind: kind, provider: AlarmProvider()) { entry in
             AlarmStatusView(entry: entry)
         }
-        .configurationDisplayName("Alart Routine")
+        .configurationDisplayName("Schedulr")
         .description("Quick reminder glance view.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
         .contentMarginsDisabled()
@@ -629,7 +718,7 @@ private struct MarkScheduleCompleteIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         var components = URLComponents()
-        components.scheme = "alartroutine"
+        components.scheme = "schedulr"
         components.host = "complete"
         components.queryItems = [
             URLQueryItem(name: "scheduleID", value: scheduleID),

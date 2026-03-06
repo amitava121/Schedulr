@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/master.swiftdeps"
+  },
+  "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/Sources/SchedulrLogic/NLPScheduleParser.swift": {
+    "dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/NLPScheduleParser.d",
+    "object": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/NLPScheduleParser.swift.o",
+    "swiftmodule": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/NLPScheduleParser~partial.swiftmodule",
+    "swift-dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/NLPScheduleParser.swiftdeps",
+    "diagnostics": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/NLPScheduleParser.dia"
+  },
+  "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/Sources/SchedulrLogic/SettingsSyncLogic.swift": {
+    "dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SettingsSyncLogic.d",
+    "object": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SettingsSyncLogic.swift.o",
+    "swiftmodule": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SettingsSyncLogic~partial.swiftmodule",
+    "swift-dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SettingsSyncLogic.swiftdeps",
+    "diagnostics": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SettingsSyncLogic.dia"
+  },
+  "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/Sources/SchedulrLogic/SupportTypes.swift": {
+    "dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SupportTypes.d",
+    "object": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SupportTypes.swift.o",
+    "swiftmodule": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SupportTypes~partial.swiftmodule",
+    "swift-dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SupportTypes.swiftdeps",
+    "diagnostics": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SupportTypes.dia"
+  },
+  "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/Sources/SchedulrLogic/SyncConflictResolver.swift": {
+    "dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SyncConflictResolver.d",
+    "object": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SyncConflictResolver.swift.o",
+    "swiftmodule": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SyncConflictResolver~partial.swiftmodule",
+    "swift-dependencies": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SyncConflictResolver.swiftdeps",
+    "diagnostics": "/Users/amitabhgiri/Documents/alart-routine/alart-routine/LogicTestsPackage/.build/arm64-apple-macosx/debug/SchedulrLogic.build/SyncConflictResolver.dia"
+  }
+}
