@@ -1,6 +1,9 @@
 import Foundation
 import SwiftData
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 #if canImport(WidgetKit)
 import WidgetKit
 #endif
@@ -48,6 +51,12 @@ final class ScheduleViewModel {
     private static let calendarNamesStorageKey = "scheduleCalendarNames.v1"
     private static let lastRestoreCompletedAtKey = "scheduleLastRestoreCompletedAt.v1"
     private static let globalSyncVersionKey = "sync.globalVersion.v1"
+    private static let lastAutoCloudUploadAtKey = "sync.lastAutoCloudUploadAt.v1"
+    private static let autoSyncMinBatteryLevel: Float = 0.35
+    private static let autoSyncIntervalWithChanges: TimeInterval = 90
+    private static let autoSyncIntervalWithChangesWhileCharging: TimeInterval = 60
+    private static let autoSyncIntervalWithoutChanges: TimeInterval = 6 * 60 * 60
+    private static let autoSyncIntervalWithoutChangesWhileCharging: TimeInterval = 30 * 60
     static let defaultCalendarName = "Reminders"
 
     private struct WidgetScheduleSnapshot: Codable {
@@ -158,6 +167,7 @@ final class ScheduleViewModel {
     var editingSchedule: Schedule?
     var editingOccurrenceDate: Date?
     var pendingNewScheduleDate: Date?
+    var pendingNewScheduleNLPInput: String?
     var calendarNames: [String] = ["Reminders"]
     var canUndo = false
     var canRedo = false
@@ -195,9 +205,10 @@ final class ScheduleViewModel {
     private var hasLoadedInitialData = false
     private var normalizeTask: Task<Void, Never>?
     private var backupWriteTask: Task<Void, Never>?
-    private var cloudUploadTask: Task<Void, Never>?
     private var lastWidgetReloadAt: Date = .distantPast
-    private var lastAutoCloudUploadAt: Date = .distantPast
+    private var lastAutoCloudUploadAt: Date = UserDefaults.standard.object(
+        forKey: ScheduleViewModel.lastAutoCloudUploadAtKey
+    ) as? Date ?? .distantPast
     private var suppressNextAutoCloudUpload = false
     private var isCloudRestoreInProgress = false
     private var isApplyingUndoRedo = false
@@ -333,7 +344,7 @@ final class ScheduleViewModel {
 
         zoomLevel = .week
     }
-    
+
     private func observeMarkAsReadNotifications() {
         NotificationCenter.default.addObserver(
             forName: .didMarkScheduleAsRead,
@@ -677,17 +688,30 @@ final class ScheduleViewModel {
     func syncCloudBackupNowIfSignedIn() {
         guard !isCloudRestoreInProgress else { return }
         guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard FirebaseSyncService.shared.isNetworkReachable else {
+            FirebaseSyncService.shared.lastErrorMessage = "No internet connection"
+            syncCoordinator.syncState = .error
+            return
+        }
 
-        syncNowWithCoordinator()
+        syncNowWithCoordinator(userInitiated: true)
     }
 
-    func syncNowWithCoordinator() {
+    func autoSyncCloudBackupIfEligible(requirePendingScheduleChanges: Bool = false) {
+        guard !isCloudRestoreInProgress else { return }
+        guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard shouldRunAutomaticCloudSync(requirePendingScheduleChanges: requirePendingScheduleChanges) else { return }
+
+        syncNowWithCoordinator(userInitiated: false)
+    }
+
+    func syncNowWithCoordinator(userInitiated: Bool = true) {
         guard !isSyncNowInProgress else { return }
         isSyncNowInProgress = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.isSyncNowInProgress = false }
-            await self.syncCoordinator.syncNow(viewModel: self)
+            await self.syncCoordinator.syncNow(viewModel: self, userInitiated: userInitiated)
             self.pendingConflictScheduleIDs = Array(Set(self.syncCoordinator.pendingConflictScheduleIDs))
         }
     }
@@ -1113,6 +1137,18 @@ final class ScheduleViewModel {
 
     func clearPendingNewScheduleDate() {
         pendingNewScheduleDate = nil
+        pendingNewScheduleNLPInput = nil
+    }
+
+    func setPendingNewScheduleNLPInput(_ input: String?) {
+        let trimmed = input?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        pendingNewScheduleNLPInput = trimmed.isEmpty ? nil : trimmed
+    }
+
+    func consumePendingNewScheduleNLPInput() -> String? {
+        let value = pendingNewScheduleNLPInput
+        pendingNewScheduleNLPInput = nil
+        return value
     }
 
     private func setRecurringCompletion(
@@ -1931,16 +1967,66 @@ final class ScheduleViewModel {
 
         guard !isCloudRestoreInProgress else { return }
         guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard !dirtyScheduleIDs.isEmpty else { return }
+        guard shouldRunAutomaticCloudSync(requirePendingScheduleChanges: true) else { return }
+
+        syncNowWithCoordinator(userInitiated: false)
+    }
+
+    private func shouldRunAutomaticCloudSync(requirePendingScheduleChanges: Bool) -> Bool {
+        let syncService = FirebaseSyncService.shared
+        guard syncService.isNetworkReachable else { return false }
+        guard syncService.isOnWiFi else { return false }
+        guard !syncService.isNetworkConstrained else { return false }
+
+        let processInfo = ProcessInfo.processInfo
+        #if os(iOS)
+        guard !processInfo.isLowPowerModeEnabled else { return false }
+        #endif
+        switch processInfo.thermalState {
+        case .serious, .critical:
+            return false
+        default:
+            break
+        }
+
+        var isCharging = false
+        #if os(iOS)
+        let device = UIDevice.current
+        let wasMonitoringBattery = device.isBatteryMonitoringEnabled
+        if !wasMonitoringBattery {
+            device.isBatteryMonitoringEnabled = true
+        }
+        defer {
+            if !wasMonitoringBattery {
+                device.isBatteryMonitoringEnabled = false
+            }
+        }
+
+        let batteryState = device.batteryState
+        isCharging = batteryState == .charging || batteryState == .full
+        let batteryLevel = device.batteryLevel
+        if !isCharging, batteryLevel >= 0, batteryLevel < Self.autoSyncMinBatteryLevel {
+            return false
+        }
+        #endif
+
+        let minimumInterval: TimeInterval
+        if requirePendingScheduleChanges, isCharging {
+            minimumInterval = Self.autoSyncIntervalWithChangesWhileCharging
+        } else if requirePendingScheduleChanges {
+            minimumInterval = Self.autoSyncIntervalWithChanges
+        } else if isCharging {
+            minimumInterval = Self.autoSyncIntervalWithoutChangesWhileCharging
+        } else {
+            minimumInterval = Self.autoSyncIntervalWithoutChanges
+        }
 
         let now = Date()
-        guard now.timeIntervalSince(lastAutoCloudUploadAt) >= 5 else { return }
+        guard now.timeIntervalSince(lastAutoCloudUploadAt) >= minimumInterval else { return false }
         lastAutoCloudUploadAt = now
-
-        cloudUploadTask?.cancel()
-        cloudUploadTask = Task { @MainActor in
-            await self.syncCoordinator.syncNow(viewModel: self)
-            self.pendingConflictScheduleIDs = Array(Set(self.syncCoordinator.pendingConflictScheduleIDs))
-        }
+        UserDefaults.standard.set(now, forKey: Self.lastAutoCloudUploadAtKey)
+        return true
     }
 
     private func rebuildWeek() {

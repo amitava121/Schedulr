@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var newCalendarName = ""
     @State private var notificationSettings: UNNotificationSettings?
     @State private var settingsCloudSyncTask: Task<Void, Never>?
+    @State private var hasPendingSettingsCloudSync = false
     @State private var showingAccentColorPicker = false
 
     private let weekdayNames: [String] = {
@@ -119,14 +120,20 @@ struct SettingsView: View {
             )
 #endif
             .onChange(of: settingsCloudSyncToken) { _, _ in
+                hasPendingSettingsCloudSync = true
                 scheduleSettingsCloudSync()
             }
             .onAppear {
                 refreshNotificationPermissionSnapshot()
             }
             .onDisappear {
+                let shouldFlushPendingSettingsSync = hasPendingSettingsCloudSync
                 settingsCloudSyncTask?.cancel()
-                viewModel.syncCloudBackupNowIfSignedIn()
+                settingsCloudSyncTask = nil
+                if shouldFlushPendingSettingsSync {
+                    hasPendingSettingsCloudSync = false
+                    viewModel.syncCloudBackupNowIfSignedIn()
+                }
             }
             .preferredColorScheme(settings.preferredColorScheme)
         }
@@ -265,6 +272,17 @@ struct SettingsView: View {
                     Circle()
                         .fill(settings.accentColor)
                         .frame(width: 18, height: 18)
+                        .overlay(
+                            Circle()
+                                .stroke(
+                                    AngularGradient(
+                                        colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink, .red],
+                                        center: .center
+                                    ),
+                                    lineWidth: 2
+                                )
+                                .padding(-2)
+                        )
                         .overlay(Circle().stroke(Color.secondary.opacity(0.24), lineWidth: 1))
                 }
             }
@@ -554,7 +572,9 @@ struct SettingsView: View {
         settingsCloudSyncTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
+            hasPendingSettingsCloudSync = false
             viewModel.syncCloudBackupNowIfSignedIn()
+            settingsCloudSyncTask = nil
         }
     }
 }
@@ -587,12 +607,14 @@ private struct DeferredAccentColorPickerPresenter: UIViewControllerRepresentable
         Coordinator(isPresented: $isPresented, onApply: onApply)
     }
 
-    final class Coordinator: NSObject, UIColorPickerViewControllerDelegate {
+    final class Coordinator: NSObject, UIColorPickerViewControllerDelegate, UIAdaptivePresentationControllerDelegate {
         let hostController = UIViewController()
         @Binding var isPresented: Bool
         var onApply: (UIColor) -> Void
         var pendingColor: UIColor = .systemBlue
+
         private weak var pickerController: UIColorPickerViewController?
+        private weak var navigationController: UINavigationController?
         var isPickerVisible: Bool { pickerController != nil }
 
         init(isPresented: Binding<Bool>, onApply: @escaping (UIColor) -> Void) {
@@ -602,21 +624,51 @@ private struct DeferredAccentColorPickerPresenter: UIViewControllerRepresentable
 
         func presentPickerIfNeeded() {
             guard pickerController == nil else { return }
-            guard let presenter = topPresenter() else { return }
-            guard presenter.presentedViewController == nil else { return }
+            guard hostController.presentedViewController == nil else { return }
 
             let picker = UIColorPickerViewController()
             picker.delegate = self
             picker.supportsAlpha = false
             picker.selectedColor = pendingColor
+            picker.navigationItem.rightBarButtonItem = UIBarButtonItem(
+                title: "Done",
+                style: .prominent,
+                target: self,
+                action: #selector(doneTapped)
+            )
+
+            let nav = UINavigationController(rootViewController: picker)
+            nav.modalPresentationStyle = .pageSheet
+            nav.presentationController?.delegate = self
+
+            if let sheet = nav.sheetPresentationController {
+                sheet.detents = [.medium()]
+                sheet.selectedDetentIdentifier = .medium
+                sheet.prefersGrabberVisible = false
+                sheet.preferredCornerRadius = 28
+            }
+
             pickerController = picker
-            presenter.present(picker, animated: true)
+            navigationController = nav
+            hostController.present(nav, animated: true)
         }
 
         func dismissPickerIfNeeded() {
-            guard let pickerController else { return }
-            pickerController.dismiss(animated: true)
-            self.pickerController = nil
+            guard let nav = navigationController else { return }
+            nav.dismiss(animated: true)
+            navigationController = nil
+            pickerController = nil
+        }
+
+        @objc
+        private func doneTapped() {
+            guard let picker = pickerController else { return }
+            pendingColor = picker.selectedColor
+            onApply(pendingColor)
+            dismissPickerIfNeeded()
+            if isPresented {
+                isPresented = false
+            }
         }
 
         func colorPickerViewControllerDidSelectColor(_ viewController: UIColorPickerViewController) {
@@ -624,22 +676,19 @@ private struct DeferredAccentColorPickerPresenter: UIViewControllerRepresentable
         }
 
         func colorPickerViewControllerDidFinish(_ viewController: UIColorPickerViewController) {
-            pendingColor = viewController.selectedColor
-            onApply(pendingColor)
+            // Dismissal is controlled by Done only.
+        }
+
+        func presentationControllerShouldDismiss(_ presentationController: UIPresentationController) -> Bool {
+            true
+        }
+
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            navigationController = nil
             pickerController = nil
             if isPresented {
                 isPresented = false
             }
-        }
-
-        private func topPresenter() -> UIViewController? {
-            guard var presenter = hostController.view.window?.rootViewController else {
-                return hostController
-            }
-            while let presented = presenter.presentedViewController {
-                presenter = presented
-            }
-            return presenter
         }
     }
 }

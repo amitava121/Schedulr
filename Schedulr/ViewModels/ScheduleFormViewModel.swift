@@ -56,6 +56,7 @@ final class ScheduleFormViewModel {
     var timeZoneIdentifier: String? = nil
     var nlpInput: String = ""
     var showNLPMode: Bool = false
+    var nlpStatusMessage: String?
     var conflictWarnings: [Schedule] = []
 
     var isEditing: Bool = false
@@ -423,9 +424,11 @@ final class ScheduleFormViewModel {
 
     // MARK: - NLP Support
 
-    func applyNLPResult() {
+    func applyNLPResult() async {
         guard !nlpInput.isEmpty else { return }
-        let result = NLPScheduleParser.parse(nlpInput)
+        let input = nlpInput
+        let parseResult = await NLPScheduleRouter.shared.parse(input)
+        let result = parseResult.parsed
         title = result.title
         if let date = result.date {
             scheduledDate = Self.normalizedScheduleDate(date)
@@ -448,6 +451,7 @@ final class ScheduleFormViewModel {
             }
         }
         tags.append(contentsOf: result.tags.filter { !tags.contains($0) })
+        nlpStatusMessage = parseResult.internetUnavailable ? "Turn on internet connection for better result." : nil
         nlpInput = ""
         showNLPMode = false
     }

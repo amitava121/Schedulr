@@ -98,6 +98,13 @@ struct ScheduleFormView: View {
                 if let pendingDate = viewModel.pendingNewScheduleDate {
                     formVM.scheduledDate = pendingDate
                 }
+                if let pendingNLPInput = viewModel.consumePendingNewScheduleNLPInput() {
+                    formVM.nlpInput = pendingNLPInput
+                    Task {
+                        await formVM.applyNLPResult()
+                        formVM.checkConflicts(against: viewModel.schedules, excluding: nil)
+                    }
+                }
             }
             ensureValidCalendarSelection()
         }
@@ -182,10 +189,18 @@ struct ScheduleFormView: View {
                         .overlay(inputBorder)
 
                         Button("Apply Parsed Details") {
-                            formVM.applyNLPResult()
+                            Task {
+                                await formVM.applyNLPResult()
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(formVM.nlpInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        if let nlpStatusMessage = formVM.nlpStatusMessage {
+                            Text(nlpStatusMessage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 

@@ -4,6 +4,13 @@ import FirebaseAuth
 import FirebaseCore
 import FirebaseFirestore
 
+enum NetworkCondition {
+    case offline
+    case constrained
+    case expensive
+    case optimal
+}
+
 enum FirebaseSyncError: LocalizedError {
     case notConfigured
     case authFailed
@@ -316,11 +323,52 @@ final class FirebaseSyncService {
     static let shared = FirebaseSyncService()
     private static let installMarkerKey = "schedulr.install.marker.v1"
     private static let deviceIDStorageKey = "scheduleDeviceID.v1"
+    private static let firestoreDatabaseInfoKey = "FIRESTORE_DATABASE_ID"
+    private static let legacyFirestoreDatabaseInfoKey = "FirestoreDatabaseID"
+    private static let inlineBackupByteLimit = 700_000
+
+    private static let iso8601WithFractionalSecondsFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 
     var isBusy = false
     var lastErrorMessage: String?
     var lastSyncedAt: Date?
-    var isNetworkReachable = true
+    var isNetworkReachable = false
+    var isOnWiFi = false
+    var isNetworkConstrained = false
+    var isNetworkExpensive = false
+    var networkCondition: NetworkCondition = .offline
+    var profileDisplayName: String?
+    var profilePhotoData: Data?
+
+    private var configuredFirestoreDatabaseID: String? {
+        let primary = Bundle.main.object(forInfoDictionaryKey: Self.firestoreDatabaseInfoKey) as? String
+        let legacy = Bundle.main.object(forInfoDictionaryKey: Self.legacyFirestoreDatabaseInfoKey) as? String
+        let raw = (primary ?? legacy)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty else { return nil }
+        if raw == "(default)" || raw.caseInsensitiveCompare("default") == .orderedSame {
+            return nil
+        }
+        return raw
+    }
+
+    // Defaults to Firestore "(default)" unless FIRESTORE_DATABASE_ID is configured in Info.plist.
+    private var firestore: Firestore {
+        guard let app = FirebaseApp.app() else { return Firestore.firestore() }
+        if let configuredFirestoreDatabaseID {
+            return Firestore.firestore(app: app, database: configuredFirestoreDatabaseID)
+        }
+        return Firestore.firestore(app: app)
+    }
 
     private var backupListener: ListenerRegistration?
     private var backupListenerTask: Task<Void, Never>?
@@ -352,12 +400,38 @@ final class FirebaseSyncService {
 
     private func startNetworkMonitoring() {
         networkMonitor.pathUpdateHandler = { [weak self] path in
-            let isReachable = path.status == .satisfied
             Task { @MainActor [weak self] in
-                self?.isNetworkReachable = isReachable
+                self?.applyNetworkPath(path)
             }
         }
         networkMonitor.start(queue: networkMonitorQueue)
+
+        let initialPath = networkMonitor.currentPath
+        Task { @MainActor [weak self] in
+            self?.applyNetworkPath(initialPath)
+        }
+    }
+
+    private func applyNetworkPath(_ path: NWPath) {
+        let isReachable = path.status == .satisfied
+        let onWiFi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
+        let constrained = path.isConstrained
+        let expensive = path.isExpensive
+
+        isNetworkReachable = isReachable
+        isOnWiFi = isReachable && onWiFi
+        isNetworkConstrained = constrained
+        isNetworkExpensive = expensive
+
+        if !isReachable {
+            networkCondition = .offline
+        } else if constrained {
+            networkCondition = .constrained
+        } else if expensive {
+            networkCondition = .expensive
+        } else {
+            networkCondition = .optimal
+        }
     }
 
     private func enforceFreshInstallAuthResetIfNeeded() {
@@ -384,6 +458,250 @@ final class FirebaseSyncService {
     var signedInEmail: String? {
         guard isFirebaseConfigured else { return nil }
         return Auth.auth().currentUser?.email
+    }
+
+    private func fallbackDisplayName(from email: String?) -> String {
+        guard let email,
+              let localPart = email.split(separator: "@").first,
+              !localPart.isEmpty
+        else {
+            return "User"
+        }
+
+        return localPart
+            .replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
+            .joined(separator: " ")
+    }
+
+    private func resolvedDisplayName(for user: User) -> String {
+        let authDisplayName = user.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let authDisplayName, !authDisplayName.isEmpty {
+            return authDisplayName
+        }
+        return fallbackDisplayName(from: user.email)
+    }
+
+    private func authProfilePhotoData(for user: User) async -> Data? {
+        guard var photoURL = user.photoURL else { return nil }
+
+        // Ask Google-hosted avatars for a predictable, high-quality size.
+        if photoURL.host?.contains("googleusercontent.com") == true {
+            if var components = URLComponents(url: photoURL, resolvingAgainstBaseURL: false) {
+                var queryItems = components.queryItems ?? []
+                queryItems.removeAll { $0.name == "sz" }
+                queryItems.append(URLQueryItem(name: "sz", value: "256"))
+                components.queryItems = queryItems
+                if let sizedURL = components.url {
+                    photoURL = sizedURL
+                }
+            }
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: photoURL)
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  !data.isEmpty
+            else {
+                return nil
+            }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    private func applyProfileFields(from data: [String: Any], fallbackEmail: String?) {
+        let cloudDisplayName = (data["profileDisplayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authDisplayName = Auth.auth().currentUser?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let cloudDisplayName, !cloudDisplayName.isEmpty {
+            profileDisplayName = cloudDisplayName
+        } else if let authDisplayName, !authDisplayName.isEmpty {
+            profileDisplayName = authDisplayName
+        } else {
+            profileDisplayName = fallbackDisplayName(from: fallbackEmail)
+        }
+
+        if let base64 = data["profilePhotoBase64"] as? String,
+           let decoded = Data(base64Encoded: base64)
+        {
+            profilePhotoData = decoded
+        }
+    }
+
+    private func persistProfileDocument(userID: String, payload: [String: Any]) async throws {
+        let profileDocument = firestore
+            .collection("users")
+            .document(userID)
+            .collection("profile")
+            .document("current")
+        try await profileDocument.setData(payload, merge: true)
+    }
+
+    func refreshProfileMetadata() async {
+        guard FirebaseApp.app() != nil else { return }
+        guard let user = Auth.auth().currentUser else {
+            profileDisplayName = nil
+            profilePhotoData = nil
+            return
+        }
+
+        let userDocument = firestore.collection("users").document(user.uid)
+        let profileDocument = userDocument.collection("profile").document("current")
+
+        do {
+            let profileSnapshot = try await profileDocument.getDocument(source: .server)
+            if let profileData = profileSnapshot.data(), !profileData.isEmpty {
+                applyProfileFields(from: profileData, fallbackEmail: user.email)
+                if profilePhotoData == nil, let authPhoto = await authProfilePhotoData(for: user) {
+                    profilePhotoData = authPhoto
+                }
+                return
+            }
+
+            let userSnapshot = try await userDocument.getDocument(source: .server)
+            applyProfileFields(from: userSnapshot.data() ?? [:], fallbackEmail: user.email)
+            if profilePhotoData == nil, let authPhoto = await authProfilePhotoData(for: user) {
+                profilePhotoData = authPhoto
+            }
+            return
+        } catch {
+            do {
+                let cachedProfile = try await profileDocument.getDocument(source: .cache)
+                if let profileData = cachedProfile.data(), !profileData.isEmpty {
+                    applyProfileFields(from: profileData, fallbackEmail: user.email)
+                    if profilePhotoData == nil, let authPhoto = await authProfilePhotoData(for: user) {
+                        profilePhotoData = authPhoto
+                    }
+                    return
+                }
+
+                let cachedUser = try await userDocument.getDocument(source: .cache)
+                applyProfileFields(from: cachedUser.data() ?? [:], fallbackEmail: user.email)
+                if profilePhotoData == nil, let authPhoto = await authProfilePhotoData(for: user) {
+                    profilePhotoData = authPhoto
+                }
+            } catch {
+                profileDisplayName = resolvedDisplayName(for: user)
+                profilePhotoData = await authProfilePhotoData(for: user)
+            }
+        }
+    }
+
+    func updateProfileMetadata(displayName: String? = nil, photoData: Data? = nil) async {
+        guard FirebaseApp.app() != nil else {
+            lastErrorMessage = FirebaseSyncError.notConfigured.localizedDescription
+            return
+        }
+
+        guard let user = Auth.auth().currentUser else {
+            lastErrorMessage = FirebaseSyncError.authFailed.localizedDescription
+            return
+        }
+
+        var payload: [String: Any] = [
+            "email": user.email ?? "",
+            "writerDeviceID": currentDeviceID,
+            "updatedAt": FieldValue.serverTimestamp()
+        ]
+
+        if let displayName {
+            let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                payload["profileDisplayName"] = trimmed
+            }
+        }
+
+        if let photoData {
+            payload["profilePhotoBase64"] = photoData.base64EncodedString()
+        }
+
+        do {
+            let userDocument = firestore.collection("users").document(user.uid)
+            try await userDocument.setData(payload, merge: true)
+            try await persistProfileDocument(userID: user.uid, payload: payload)
+
+            if let displayName,
+               !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                let request = user.createProfileChangeRequest()
+                request.displayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                try? await request.commitChanges()
+            }
+
+            if let displayName,
+               !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                profileDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let photoData {
+                profilePhotoData = photoData
+            }
+
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = (error as NSError).localizedDescription
+        }
+    }
+
+    func ensureProfileSeededFromEmailIfNeeded() async {
+        guard FirebaseApp.app() != nil else { return }
+        guard let user = Auth.auth().currentUser else { return }
+
+        let seededName = resolvedDisplayName(for: user)
+
+        if user.displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            let request = user.createProfileChangeRequest()
+            request.displayName = seededName
+            try? await request.commitChanges()
+        }
+
+        do {
+            let document = firestore.collection("users").document(user.uid)
+            let snapshot = try? await document.getDocument(source: .server)
+            let profileSnapshot = try? await document.collection("profile").document("current").getDocument(source: .server)
+            let existingName = ((profileSnapshot?.data()?["profileDisplayName"] as? String)
+                ?? (snapshot?.data()?["profileDisplayName"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let existingPhotoBase64 = ((profileSnapshot?.data()?["profilePhotoBase64"] as? String)
+                ?? (snapshot?.data()?["profilePhotoBase64"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let needsNameSeed = existingName?.isEmpty != false
+            let needsPhotoSeed = existingPhotoBase64?.isEmpty != false
+
+            if needsNameSeed || needsPhotoSeed {
+                var payload: [String: Any] = [
+                    "email": user.email ?? "",
+                    "writerDeviceID": currentDeviceID,
+                    "updatedAt": FieldValue.serverTimestamp()
+                ]
+
+                if needsNameSeed {
+                    payload["profileDisplayName"] = seededName
+                }
+
+                if needsPhotoSeed, let authPhoto = await authProfilePhotoData(for: user) {
+                    payload["profilePhotoBase64"] = authPhoto.base64EncodedString()
+                    profilePhotoData = authPhoto
+                }
+
+                try await document.setData(payload, merge: true)
+                try await persistProfileDocument(userID: user.uid, payload: payload)
+            }
+
+            await refreshProfileMetadata()
+        } catch {
+            // Keep local fallback name even if cloud write is deferred or fails.
+            profileDisplayName = seededName
+            if profilePhotoData == nil {
+                profilePhotoData = await authProfilePhotoData(for: user)
+            }
+        }
     }
 
     func registerBackupUpdateHandler(_ handler: @escaping (Data) -> Void) {
@@ -413,6 +731,7 @@ final class FirebaseSyncService {
             _ = try await Auth.auth().signIn(withEmail: normalizedEmail, password: password)
             lastErrorMessage = nil
             startRealtimeListenerIfNeeded()
+            await ensureProfileSeededFromEmailIfNeeded()
         } catch {
             lastErrorMessage = (error as NSError).localizedDescription
         }
@@ -437,6 +756,7 @@ final class FirebaseSyncService {
             _ = try await Auth.auth().createUser(withEmail: normalizedEmail, password: password)
             lastErrorMessage = nil
             startRealtimeListenerIfNeeded()
+            await ensureProfileSeededFromEmailIfNeeded()
         } catch {
             lastErrorMessage = (error as NSError).localizedDescription
         }
@@ -455,6 +775,7 @@ final class FirebaseSyncService {
             _ = try await Auth.auth().signIn(with: credential)
             lastErrorMessage = nil
             startRealtimeListenerIfNeeded()
+            await ensureProfileSeededFromEmailIfNeeded()
         } catch {
             lastErrorMessage = (error as NSError).localizedDescription
         }
@@ -473,6 +794,7 @@ final class FirebaseSyncService {
             _ = try await Auth.auth().signInAnonymously()
             lastErrorMessage = nil
             startRealtimeListenerIfNeeded()
+            await ensureProfileSeededFromEmailIfNeeded()
         } catch {
             lastErrorMessage = (error as NSError).localizedDescription
         }
@@ -515,6 +837,8 @@ final class FirebaseSyncService {
         do {
             try Auth.auth().signOut()
             lastErrorMessage = nil
+            profileDisplayName = nil
+            profilePhotoData = nil
         } catch {
             lastErrorMessage = (error as NSError).localizedDescription
         }
@@ -535,18 +859,18 @@ final class FirebaseSyncService {
         defer { isBusy = false }
 
         do {
-            let backupBase64 = backupData.base64EncodedString()
-            let document = Firestore.firestore().collection("users").document(user.uid)
-            let payload: [String: Any] = [
-                "email": user.email ?? "",
-                "backupBase64": backupBase64,
-                "writerDeviceID": currentDeviceID,
-                "updatedAt": FieldValue.serverTimestamp()
-            ]
+            let document = firestore.collection("users").document(user.uid)
+            try await persistStructuredBackupData(
+                from: backupData,
+                userDocument: document,
+                globalSyncVersion: nil
+            )
+            let payload = makeUserBackupPayload(
+                email: user.email,
+                backupData: backupData,
+                globalSyncVersion: nil
+            )
             try await document.setData(payload, merge: true)
-            // Do not mark synced using local device time here.
-            // Firestore writes can be queued offline; confirmed sync time is set
-            // from server document data in listener/download flows.
             lastErrorMessage = nil
         } catch {
             lastErrorMessage = (error as NSError).localizedDescription
@@ -560,7 +884,7 @@ final class FirebaseSyncService {
         isBusy = true
         defer { isBusy = false }
 
-        let document = Firestore.firestore()
+        let document = firestore
             .collection("users")
             .document(user.uid)
             .collection("pendingDeltas")
@@ -583,7 +907,7 @@ final class FirebaseSyncService {
         defer { isBusy = false }
 
         do {
-            let snapshot = try await Firestore.firestore()
+            let snapshot = try await firestore
                 .collection("users")
                 .document(user.uid)
                 .collection("pendingDeltas")
@@ -612,7 +936,6 @@ final class FirebaseSyncService {
         isBusy = true
         defer { isBusy = false }
 
-        let firestore = Firestore.firestore()
         let batch = firestore.batch()
         let collection = firestore.collection("users").document(user.uid).collection("pendingDeltas")
 
@@ -636,22 +959,32 @@ final class FirebaseSyncService {
         isBusy = true
         defer { isBusy = false }
 
-        let document = Firestore.firestore().collection("users").document(user.uid)
+        let document = firestore.collection("users").document(user.uid)
 
         do {
-            let snapshot = try await document.getDocument(source: .server)
-            let serverVersion = snapshot.data()?["globalSyncVersion"] as? Int ?? 0
+            let serverVersion: Int
+            if let serverSnapshot = try? await document.getDocument(source: .server) {
+                serverVersion = serverSnapshot.data()?["globalSyncVersion"] as? Int ?? 0
+            } else if let cacheSnapshot = try? await document.getDocument(source: .cache) {
+                serverVersion = cacheSnapshot.data()?["globalSyncVersion"] as? Int ?? 0
+            } else {
+                serverVersion = 0
+            }
+
             guard currentVersion >= serverVersion else {
                 throw FirebaseSyncError.staleVersion
             }
 
-            let payload: [String: Any] = [
-                "email": user.email ?? "",
-                "backupBase64": backupData.base64EncodedString(),
-                "writerDeviceID": currentDeviceID,
-                "globalSyncVersion": currentVersion,
-                "updatedAt": FieldValue.serverTimestamp()
-            ]
+            try await persistStructuredBackupData(
+                from: backupData,
+                userDocument: document,
+                globalSyncVersion: currentVersion
+            )
+            let payload = makeUserBackupPayload(
+                email: user.email,
+                backupData: backupData,
+                globalSyncVersion: currentVersion
+            )
             try await document.setData(payload, merge: true)
             lastErrorMessage = nil
         } catch let syncError as FirebaseSyncError {
@@ -677,7 +1010,7 @@ final class FirebaseSyncService {
         isBusy = true
         defer { isBusy = false }
 
-        let document = Firestore.firestore().collection("users").document(user.uid)
+        let document = firestore.collection("users").document(user.uid)
 
         do {
             let serverSnapshot = try await document.getDocument(source: .server)
@@ -688,6 +1021,19 @@ final class FirebaseSyncService {
                 lastErrorMessage = nil
                 return backup
             }
+
+            if let structuredBackup = await structuredBackupData(
+                userID: user.uid,
+                source: .server,
+                globalSyncVersion: serverSnapshot.data()?["globalSyncVersion"] as? Int
+            ) {
+                if let updatedAt = serverSnapshot.data()?["updatedAt"] as? Timestamp {
+                    lastSyncedAt = updatedAt.dateValue()
+                }
+                lastErrorMessage = nil
+                return structuredBackup
+            }
+
             throw FirebaseSyncError.missingBackup
         } catch {
             do {
@@ -699,11 +1045,323 @@ final class FirebaseSyncService {
                     lastErrorMessage = nil
                     return backup
                 }
+
+                if let structuredBackup = await structuredBackupData(
+                    userID: user.uid,
+                    source: .cache,
+                    globalSyncVersion: cacheSnapshot.data()?["globalSyncVersion"] as? Int
+                ) {
+                    if let updatedAt = cacheSnapshot.data()?["updatedAt"] as? Timestamp {
+                        lastSyncedAt = updatedAt.dateValue()
+                    }
+                    lastErrorMessage = nil
+                    return structuredBackup
+                }
+
                 throw FirebaseSyncError.missingBackup
             } catch {
                 lastErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 return nil
             }
+        }
+    }
+
+    private func makeUserBackupPayload(
+        email: String?,
+        backupData: Data,
+        globalSyncVersion: Int?
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "email": email ?? "",
+            "writerDeviceID": currentDeviceID,
+            "updatedAt": FieldValue.serverTimestamp(),
+            "backupSizeBytes": backupData.count
+        ]
+
+        if let globalSyncVersion {
+            payload["globalSyncVersion"] = globalSyncVersion
+        }
+
+        if backupData.count <= Self.inlineBackupByteLimit {
+            payload["backupBase64"] = backupData.base64EncodedString()
+            payload["backupStorageMode"] = "inline"
+        } else {
+            // Avoid Firestore's 1MB single-document limit by storing normalized docs.
+            payload["backupBase64"] = FieldValue.delete()
+            payload["backupStorageMode"] = "structured"
+        }
+
+        return payload
+    }
+
+    private func persistStructuredBackupData(
+        from backupData: Data,
+        userDocument: DocumentReference,
+        globalSyncVersion: Int?
+    ) async throws {
+        guard let backupRoot = (try? JSONSerialization.jsonObject(with: backupData)) as? [String: Any] else {
+            return
+        }
+
+        try await persistSettingsDocument(
+            fromBackupRoot: backupRoot,
+            userDocument: userDocument,
+            globalSyncVersion: globalSyncVersion
+        )
+        try await persistSchedulesCollection(fromBackupRoot: backupRoot, userDocument: userDocument)
+    }
+
+    private func persistSettingsDocument(
+        fromBackupRoot backupRoot: [String: Any],
+        userDocument: DocumentReference,
+        globalSyncVersion: Int?
+    ) async throws {
+        var settingsData = backupRoot["appSettings"] as? [String: Any] ?? [:]
+        let calendarNames = (backupRoot["calendarNames"] as? [Any])?.compactMap { $0 as? String } ?? []
+        let resolvedGlobalVersion = globalSyncVersion ?? (backupRoot["globalSyncVersion"] as? Int)
+
+        guard !settingsData.isEmpty || !calendarNames.isEmpty || resolvedGlobalVersion != nil else {
+            return
+        }
+
+        convertDateField(in: &settingsData, key: "settingsUpdatedAt")
+        if !calendarNames.isEmpty {
+            settingsData["calendarNames"] = calendarNames
+        }
+        if let version = resolvedGlobalVersion {
+            settingsData["globalSyncVersion"] = version
+        }
+        settingsData["writerDeviceID"] = currentDeviceID
+        settingsData["updatedAt"] = FieldValue.serverTimestamp()
+
+        try await userDocument
+            .collection("settings")
+            .document("current")
+            .setData(settingsData, merge: true)
+    }
+
+    private func persistSchedulesCollection(
+        fromBackupRoot backupRoot: [String: Any],
+        userDocument: DocumentReference
+    ) async throws {
+        let scheduleCollection = userDocument.collection("schedules")
+        guard let rawSchedules = backupRoot["schedules"] as? [Any] else { return }
+
+        let existingSnapshot = try await scheduleCollection.getDocuments()
+        var incomingIDs: Set<String> = []
+        var normalizedSchedules: [(id: String, data: [String: Any])] = []
+
+        for rawSchedule in rawSchedules {
+            guard var schedule = rawSchedule as? [String: Any],
+                  let scheduleID = (schedule["id"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !scheduleID.isEmpty
+            else {
+                continue
+            }
+
+            incomingIDs.insert(scheduleID)
+            schedule.removeValue(forKey: "id")
+            normalizeScheduleDateFields(in: &schedule)
+            schedule["scheduleID"] = scheduleID
+            schedule["writerDeviceID"] = currentDeviceID
+            schedule["updatedAt"] = FieldValue.serverTimestamp()
+            normalizedSchedules.append((id: scheduleID, data: schedule))
+        }
+
+        let staleIDs = Set(existingSnapshot.documents.map(\.documentID)).subtracting(incomingIDs)
+        var batch = firestore.batch()
+        var operationCount = 0
+
+        func commitBatchIfNeeded(force: Bool = false) async throws {
+            guard operationCount > 0 else { return }
+            if !force, operationCount < 450 { return }
+            try await batch.commit()
+            batch = firestore.batch()
+            operationCount = 0
+        }
+
+        for schedule in normalizedSchedules {
+            batch.setData(schedule.data, forDocument: scheduleCollection.document(schedule.id), merge: true)
+            operationCount += 1
+            try await commitBatchIfNeeded()
+        }
+
+        for staleID in staleIDs {
+            batch.deleteDocument(scheduleCollection.document(staleID))
+            operationCount += 1
+            try await commitBatchIfNeeded()
+        }
+
+        try await commitBatchIfNeeded(force: true)
+    }
+
+    private func normalizeScheduleDateFields(in schedule: inout [String: Any]) {
+        let scalarDateKeys = ["createdAt", "updatedAt", "deletedAt", "scheduledDate", "repeatEndDate"]
+        scalarDateKeys.forEach { key in
+            convertDateField(in: &schedule, key: key)
+        }
+
+        convertDateArrayField(in: &schedule, key: "excludedOccurrenceDates")
+    }
+
+    private func convertDateField(in dictionary: inout [String: Any], key: String) {
+        guard let value = dictionary[key] else { return }
+        if value is NSNull { return }
+        if let timestamp = timestampValue(from: value) {
+            dictionary[key] = timestamp
+        }
+    }
+
+    private func convertDateArrayField(in dictionary: inout [String: Any], key: String) {
+        guard let values = dictionary[key] as? [Any] else { return }
+        let timestamps = values.compactMap { value -> Timestamp? in
+            if value is NSNull { return nil }
+            return timestampValue(from: value)
+        }
+        dictionary[key] = timestamps
+    }
+
+    private func timestampValue(from value: Any) -> Timestamp? {
+        if let timestamp = value as? Timestamp {
+            return timestamp
+        }
+        if let date = value as? Date {
+            return Timestamp(date: date)
+        }
+        if let text = value as? String,
+           let date = Self.iso8601WithFractionalSecondsFormatter.date(from: text)
+            ?? Self.iso8601Formatter.date(from: text)
+        {
+            return Timestamp(date: date)
+        }
+        return nil
+    }
+
+    private func structuredBackupData(
+        userID: String,
+        source: FirestoreSource,
+        globalSyncVersion: Int?
+    ) async -> CloudBackupDownload? {
+        let userDocument = firestore.collection("users").document(userID)
+
+        do {
+            let settingsSnapshot = try await userDocument
+                .collection("settings")
+                .document("current")
+                .getDocument(source: source)
+            let schedulesSnapshot = try await userDocument
+                .collection("schedules")
+                .getDocuments(source: source)
+
+            let schedulePayload = schedulesSnapshot.documents.map { scheduleDocumentJSON(from: $0) }
+            let settingsData = settingsSnapshot.data() ?? [:]
+
+            var appSettings: [String: Any] = [:]
+            var calendarNames: [String] = []
+            for (key, value) in settingsData {
+                if key == "calendarNames" {
+                    calendarNames = (value as? [Any])?.compactMap { $0 as? String } ?? []
+                    continue
+                }
+                if key == "writerDeviceID" || key == "updatedAt" || key == "globalSyncVersion" {
+                    continue
+                }
+                if let jsonValue = jsonCompatibleValue(from: value) {
+                    appSettings[key] = jsonValue
+                }
+            }
+
+            let resolvedGlobalVersion = globalSyncVersion ?? (settingsData["globalSyncVersion"] as? Int)
+
+            guard !schedulePayload.isEmpty || !appSettings.isEmpty || !calendarNames.isEmpty else {
+                return nil
+            }
+
+            var payload: [String: Any] = [
+                "version": 2,
+                "exportedAt": Self.iso8601WithFractionalSecondsFormatter.string(from: Date()),
+                "schedules": schedulePayload
+            ]
+
+            if !appSettings.isEmpty {
+                payload["appSettings"] = appSettings
+            }
+            if !calendarNames.isEmpty {
+                payload["calendarNames"] = calendarNames
+            }
+            if let resolvedGlobalVersion {
+                payload["globalSyncVersion"] = resolvedGlobalVersion
+            }
+
+            guard JSONSerialization.isValidJSONObject(payload),
+                  let encoded = try? JSONSerialization.data(withJSONObject: payload, options: [])
+            else {
+                return nil
+            }
+
+            return CloudBackupDownload(data: encoded, globalSyncVersion: resolvedGlobalVersion)
+        } catch {
+            return nil
+        }
+    }
+
+    private func scheduleDocumentJSON(from document: QueryDocumentSnapshot) -> [String: Any] {
+        var json: [String: Any] = ["id": document.documentID]
+        for (key, value) in document.data() {
+            if key == "scheduleID"
+                || key == "writerDeviceID"
+                || key == "updatedAt"
+                || key == "serverUpdatedAt"
+                || key == "clientUpdatedAt"
+                || key == "deviceID"
+            {
+                continue
+            }
+            if let normalized = jsonCompatibleValue(from: value) {
+                json[key] = normalized
+            } else {
+                json[key] = NSNull()
+            }
+        }
+        return json
+    }
+
+    private func jsonCompatibleValue(from value: Any) -> Any? {
+        switch value {
+        case let timestamp as Timestamp:
+            return Self.iso8601WithFractionalSecondsFormatter.string(from: timestamp.dateValue())
+        case let date as Date:
+            return Self.iso8601WithFractionalSecondsFormatter.string(from: date)
+        case let string as String:
+            return string
+        case let bool as Bool:
+            return bool
+        case let int as Int:
+            return int
+        case let double as Double:
+            return double.isFinite ? double : nil
+        case let number as NSNumber:
+            return number
+        case let array as [Any]:
+            return array.map { element -> Any in
+                if element is NSNull { return NSNull() }
+                return jsonCompatibleValue(from: element) ?? NSNull()
+            }
+        case let dictionary as [String: Any]:
+            var normalized: [String: Any] = [:]
+            for (key, nestedValue) in dictionary {
+                if nestedValue is NSNull {
+                    normalized[key] = NSNull()
+                } else if let mapped = jsonCompatibleValue(from: nestedValue) {
+                    normalized[key] = mapped
+                }
+            }
+            return normalized
+        case is NSNull:
+            return NSNull()
+        default:
+            return nil
         }
     }
 
@@ -717,7 +1375,8 @@ final class FirebaseSyncService {
 
         guard let user = Auth.auth().currentUser else { return }
 
-        let document = Firestore.firestore().collection("users").document(user.uid)
+        let userID = user.uid
+        let document = firestore.collection("users").document(userID)
         backupListener = document.addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
             guard let self else { return }
             if let error {
@@ -733,14 +1392,12 @@ final class FirebaseSyncService {
             }
             let data = snapshot.data() ?? [:]
 
-            if let writerDeviceID = data["writerDeviceID"] as? String,
-               writerDeviceID == self.currentDeviceID {
-                return
+            Task { @MainActor in
+                self.applyProfileFields(from: data, fallbackEmail: Auth.auth().currentUser?.email)
             }
 
-            guard let backupBase64 = data["backupBase64"] as? String,
-                  let backupData = Data(base64Encoded: backupBase64)
-            else {
+            if let writerDeviceID = data["writerDeviceID"] as? String,
+               writerDeviceID == self.currentDeviceID {
                 return
             }
 
@@ -748,7 +1405,19 @@ final class FirebaseSyncService {
                 if let updatedAt = data["updatedAt"] as? Timestamp {
                     self.lastSyncedAt = updatedAt.dateValue()
                 }
-                self.backupUpdateHandler?(backupData)
+
+                if let inlineBackup = self.backupData(from: snapshot) {
+                    self.backupUpdateHandler?(inlineBackup.data)
+                    return
+                }
+
+                if let structuredBackup = await self.structuredBackupData(
+                    userID: userID,
+                    source: .server,
+                    globalSyncVersion: data["globalSyncVersion"] as? Int
+                ) {
+                    self.backupUpdateHandler?(structuredBackup.data)
+                }
             }
         }
     }

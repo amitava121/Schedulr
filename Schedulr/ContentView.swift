@@ -16,6 +16,11 @@ struct ContentView: View {
         case editSchedule(UUID)
     }
 
+    private enum PostAuthDestination {
+        case account
+        case settings
+    }
+
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = ScheduleViewModel()
@@ -38,6 +43,9 @@ struct ContentView: View {
     @State private var cloudRestoreStatusTask: Task<Void, Never>?
     @State private var quickAddButtonPosition: CGPoint?
     @State private var accentRefreshTick = 0
+    @State private var isWeekQuickAddComposerPresented = false
+    @State private var weekQuickAddInput = ""
+    @State private var isWeekQuickAddProcessing = false
     @State private var showCloudRestorePrompt = false
     @State private var pendingCloudBackupData: Data?
     @State private var pendingCloudBackupSignature: String?
@@ -45,6 +53,10 @@ struct ContentView: View {
     @State private var restoreSettingsFromCloud = true
     @State private var hasCheckedInitialCloudRestore = false
     @State private var quickAddButtonDidDrag = false
+    @State private var quickAddDragStartPosition: CGPoint?
+    @State private var pendingPostAuthDestination: PostAuthDestination?
+    @State private var isSignedInForWeekToolbar = FirebaseSyncService.shared.isSignedIn
+    @State private var hasPerformedLaunchAutoSync = false
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -101,17 +113,38 @@ struct ContentView: View {
                     syncZoomLevelForNavigationPath(path)
                 }
                 .onChange(of: firebaseService.isSignedIn) { _, isSignedIn in
+                    isSignedInForWeekToolbar = isSignedIn
+
                     if !isSignedIn {
+                        hasPerformedLaunchAutoSync = false
                         hasCheckedInitialCloudRestore = false
                         pendingCloudBackupData = nil
                         pendingCloudBackupSignature = nil
                         showCloudRestorePrompt = false
+                        pendingPostAuthDestination = nil
                         viewModel.completeCloudRestoreGate()
                         return
                     }
 
+                    // After any successful auth, always return to Account page
+                    // once the cloud backup check flow completes.
+                    pendingPostAuthDestination = .account
+
+                    // Dismiss currently open auth host surfaces before showing restore prompt.
+                    if isAccountPresented {
+                        isAccountPresented = false
+                    }
+                    if isSettingsPresented {
+                        isSettingsPresented = false
+                    }
+
                     hasCheckedInitialCloudRestore = false
-                    prepareCloudRestorePrompt(showSuccessBanner: true)
+                    prepareCloudRestorePrompt(showSuccessBanner: false)
+                }
+                .onChange(of: isAccountPresented) { _, isPresented in
+                    if !isPresented {
+                        refreshWeekToolbarAuthState()
+                    }
                 }
                 .onChange(of: AppSettings.shared.firstDayOfWeek) { _, _ in
                     viewModel.prepareDefaultWeekLanding()
@@ -119,6 +152,32 @@ struct ContentView: View {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .accentColorDidChange)) { _ in
                     accentRefreshTick &+= 1
+                }
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("Schedulr.AuthDidSucceed"))) { _ in
+                    // Hide account entry immediately after auth success, before cloud-restore prompt work finishes.
+                    isSignedInForWeekToolbar = true
+
+                    // Trigger restore check immediately on auth success instead of waiting
+                    // for secondary view updates to propagate auth state.
+                    pendingPostAuthDestination = .account
+                    if isAccountPresented {
+                        isAccountPresented = false
+                    }
+                    if isSettingsPresented {
+                        isSettingsPresented = false
+                    }
+                    hasCheckedInitialCloudRestore = false
+                    prepareCloudRestorePrompt(showSuccessBanner: false)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("Schedulr.AuthDidSignOut"))) { _ in
+                    // Show account entry immediately after sign-out.
+                    isSignedInForWeekToolbar = false
+                    pendingCloudBackupData = nil
+                    pendingCloudBackupSignature = nil
+                    showCloudRestorePrompt = false
+                    pendingPostAuthDestination = nil
+                    hasCheckedInitialCloudRestore = false
+                    viewModel.completeCloudRestoreGate()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .didTapScheduleNotification)) { notification in
                     handleNotificationTap(notification.userInfo)
@@ -145,6 +204,7 @@ struct ContentView: View {
                     viewModel.prepareDefaultWeekLanding()
                     pasteboardManager.startMonitoring()
                     weekPickerDate = viewModel.selectedDate
+                    refreshWeekToolbarAuthState()
 #if os(iOS)
                     KeyboardWarmup.prewarmIfNeeded()
 #endif
@@ -202,11 +262,13 @@ struct ContentView: View {
                             pendingCloudBackupData = nil
                             showCloudRestorePrompt = false
                             viewModel.completeCloudRestoreGate()
+                            redirectAfterCloudRestoreFlowIfNeeded()
                         },
                         onRestore: {
                             guard let data = pendingCloudBackupData else {
                                 showCloudRestorePrompt = false
                                 viewModel.completeCloudRestoreGate()
+                                redirectAfterCloudRestoreFlowIfNeeded()
                                 return
                             }
 
@@ -228,6 +290,7 @@ struct ContentView: View {
                                     includeSettings: restoreSettingsFromCloud
                                 )
                                 showCloudRestoreStatus("Cloud data restored")
+                                redirectAfterCloudRestoreFlowIfNeeded()
                             }
                         }
                     )
@@ -235,17 +298,22 @@ struct ContentView: View {
 #if os(iOS)
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
+                        refreshWeekToolbarAuthState()
                         // Reset floating button to its default anchor whenever the app is opened.
                         quickAddButtonPosition = nil
                         quickAddButtonDidDrag = false
                         pasteboardManager.startMonitoring()
                         viewModel.consumeWidgetCompletionRequests()
                         handlePendingNotificationNavigation()
-                        if AppSettings.shared.autoSyncOnLaunch, FirebaseSyncService.shared.isSignedIn {
-                            viewModel.syncCloudBackupNowIfSignedIn()
+                        if AppSettings.shared.autoSyncOnLaunch,
+                           FirebaseSyncService.shared.isSignedIn,
+                           !hasPerformedLaunchAutoSync
+                        {
+                            hasPerformedLaunchAutoSync = true
+                            viewModel.autoSyncCloudBackupIfEligible()
                         }
                     } else if newPhase == .background {
-                        viewModel.syncCloudBackupNowIfSignedIn()
+                        viewModel.autoSyncCloudBackupIfEligible(requirePendingScheduleChanges: true)
                         pasteboardManager.stopMonitoring()
                     }
                 }
@@ -276,6 +344,25 @@ struct ContentView: View {
 #if os(iOS)
         .fullScreenCover(isPresented: $isWeekDatePickerPresented) {
             weekCalendarSheet
+        }
+        .sheet(isPresented: $isWeekQuickAddComposerPresented) {
+            WeekQuickAddComposerView(
+                inputText: $weekQuickAddInput,
+                isProcessing: isWeekQuickAddProcessing,
+                onSave: {
+                    Task {
+                        await handleWeekQuickAddSubmission(openEditor: false)
+                    }
+                },
+                onReview: {
+                    Task {
+                        await handleWeekQuickAddSubmission(openEditor: true)
+                    }
+                }
+            )
+            .presentationDetents([.height(330), .fraction(0.42)])
+            .presentationBackgroundInteraction(.enabled)
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $isSearchPresented) {
             NavigationStack {
@@ -376,18 +463,47 @@ struct ContentView: View {
                 GeometryReader { proxy in
                     Group {
                         if naturalLanguageEnabled && hasClipboardContent {
-                            HStack(spacing: 8) {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 17, weight: .bold))
-                                Image(systemName: "doc.on.clipboard.fill")
-                                    .font(.system(size: 16, weight: .semibold))
+                            HStack(spacing: 0) {
+                                Button {
+                                    guard !quickAddButtonDidDrag else { return }
+                                    presentWeekQuickAddComposer()
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 17, weight: .bold))
+                                        .frame(width: 50, height: 48)
+                                }
+                                .buttonStyle(.plain)
+
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.22))
+                                    .frame(width: 1, height: 24)
+
+                                Button {
+                                    guard !quickAddButtonDidDrag else { return }
+                                    presentPasteboardQuickAdd()
+                                } label: {
+                                    Image(systemName: "doc.on.clipboard.fill")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .frame(width: 50, height: 48)
+                                }
+                                .buttonStyle(.plain)
                             }
                             .frame(height: 48)
-                            .padding(.horizontal, 16)
+                            .padding(.horizontal, 4)
                         } else {
-                            Image(systemName: naturalLanguageEnabled ? "plus" : "doc.on.clipboard.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .frame(width: 48, height: 48)
+                            Button {
+                                guard !quickAddButtonDidDrag else { return }
+                                if naturalLanguageEnabled {
+                                    presentWeekQuickAddComposer()
+                                } else if hasClipboardContent {
+                                    presentPasteboardQuickAdd()
+                                }
+                            } label: {
+                                Image(systemName: naturalLanguageEnabled ? "plus" : "doc.on.clipboard.fill")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .frame(width: 48, height: 48)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .foregroundStyle(.white)
@@ -427,29 +543,39 @@ struct ContentView: View {
                             quickAddButtonPosition = clampedQuickAddButtonPosition(current, in: proxy.size)
                         }
                     }
-                    .gesture(
-                        DragGesture(minimumDistance: 0, coordinateSpace: .named("FloatingButtonSpace"))
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8, coordinateSpace: .named("FloatingButtonSpace"))
                             .onChanged { value in
+                                if quickAddDragStartPosition == nil {
+                                    quickAddDragStartPosition = quickAddButtonPosition ?? defaultQuickAddButtonPosition(in: proxy.size)
+                                }
+
                                 let movement = hypot(value.translation.width, value.translation.height)
-                                if movement > 1 {
+                                if movement > 2 {
                                     quickAddButtonDidDrag = true
-                                    quickAddButtonPosition = clampedQuickAddButtonPosition(value.location, in: proxy.size)
+                                }
+
+                                if quickAddButtonDidDrag, let start = quickAddDragStartPosition {
+                                    let translatedPoint = CGPoint(
+                                        x: start.x + value.translation.width,
+                                        y: start.y + value.translation.height
+                                    )
+                                    quickAddButtonPosition = clampedQuickAddButtonPosition(translatedPoint, in: proxy.size)
                                 }
                             }
                             .onEnded { value in
-                                if quickAddButtonDidDrag {
-                                    quickAddButtonPosition = clampedQuickAddButtonPosition(value.location, in: proxy.size)
-                                } else {
-                                    if hasClipboardContent {
-                                        presentPasteboardQuickAdd()
-                                    } else if naturalLanguageEnabled {
-                                        let date = viewModel.selectedDate
-                                        let index = min(max(viewModel.selectedDayIndex, 0), 6)
-                                        viewModel.startAddingSchedule(on: date, dayIndex: index)
-                                    }
+                                if quickAddButtonDidDrag, let start = quickAddDragStartPosition {
+                                    let translatedPoint = CGPoint(
+                                        x: start.x + value.translation.width,
+                                        y: start.y + value.translation.height
+                                    )
+                                    quickAddButtonPosition = clampedQuickAddButtonPosition(translatedPoint, in: proxy.size)
                                 }
 
-                                quickAddButtonDidDrag = false
+                                quickAddDragStartPosition = nil
+                                DispatchQueue.main.async {
+                                    quickAddButtonDidDrag = false
+                                }
                             }
                     )
                 }
@@ -550,7 +676,7 @@ struct ContentView: View {
             .buttonStyle(TransparentCircleButtonStyle())
 #endif
 
-            if !firebaseService.isSignedIn {
+            if !isSignedInForWeekToolbar {
                 Button {
                     isAccountPresented = true
                 } label: {
@@ -558,7 +684,6 @@ struct ContentView: View {
                         .font(.headline.weight(.semibold))
                         .frame(width: 38, height: 38)
                 }
-                .accessibilityLabel("Sign In")
 #if !os(macOS)
                 .buttonStyle(TransparentCircleButtonStyle())
 #endif
@@ -728,6 +853,7 @@ struct ContentView: View {
                         pendingCloudBackupData = nil
                         showCloudRestorePrompt = false
                         viewModel.completeCloudRestoreGate()
+                        redirectAfterCloudRestoreFlowIfNeeded()
                         return
                     }
 
@@ -749,6 +875,24 @@ struct ContentView: View {
                 if showSuccessBanner {
                     showCloudRestoreStatus("No cloud backup found")
                 }
+                // Cloud is empty for this account; push local state once to bootstrap sync.
+                viewModel.syncCloudBackupNowIfSignedIn()
+                redirectAfterCloudRestoreFlowIfNeeded()
+            }
+        }
+    }
+
+    private func redirectAfterCloudRestoreFlowIfNeeded() {
+        guard let destination = pendingPostAuthDestination else { return }
+        pendingPostAuthDestination = nil
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            switch destination {
+            case .account:
+                isAccountPresented = true
+            case .settings:
+                isSettingsPresented = true
             }
         }
     }
@@ -805,16 +949,21 @@ struct ContentView: View {
     }
 
     private func defaultQuickAddButtonPosition(in size: CGSize) -> CGPoint {
-        CGPoint(x: max(72, size.width - 56), y: max(72, size.height - 62))
+        let trailingInset: CGFloat = (AppSettings.shared.hotNaturalLanguageEnabled && pasteboardManager.hasQuickAddContent) ? 88 : 56
+        return CGPoint(x: max(72, size.width - trailingInset), y: max(72, size.height - 62))
     }
 
     private func clampedQuickAddButtonPosition(_ point: CGPoint, in size: CGSize) -> CGPoint {
-        let horizontalPadding: CGFloat = 62
+        let horizontalPadding: CGFloat = (AppSettings.shared.hotNaturalLanguageEnabled && pasteboardManager.hasQuickAddContent) ? 92 : 62
         let verticalPadding: CGFloat = 34
         return CGPoint(
             x: min(max(point.x, horizontalPadding), size.width - horizontalPadding),
             y: min(max(point.y, verticalPadding), size.height - verticalPadding)
         )
+    }
+
+    private func refreshWeekToolbarAuthState() {
+        isSignedInForWeekToolbar = firebaseService.isSignedIn
     }
 
     private var isPresentingForm: Bool {
@@ -1003,10 +1152,15 @@ struct ContentView: View {
             // Because we only know `hasStrings` is true until user taps the button,
             // we must do the actual read NOW. This will trigger the iOS prompt if they
             // haven't permanently allowed it, but it only happens exactly when they tap it.
-            if let parsed = PasteboardManager.shared.parseAndCreateScheduleFromActualPasteboard() {
-                pendingPasteboardParse = parsed
-            } else {
-                HapticManager.notification(.warning)
+            Task {
+                if let parseResult = await PasteboardManager.shared.parseAndCreateScheduleFromActualPasteboard() {
+                    pendingPasteboardParse = parseResult.parsed
+                    if parseResult.internetUnavailable {
+                        showCloudRestoreStatus("Turn on internet connection for better result.")
+                    }
+                } else {
+                    HapticManager.notification(.warning)
+                }
             }
         }
     }
@@ -1027,10 +1181,66 @@ struct ContentView: View {
         )
 
         viewModel.addSchedule(schedule)
+        pasteboardManager.markCurrentClipboardAsConsumed()
+        pasteboardManager.dismissDetection()
 
         if openEditor {
             viewModel.startEditingSchedule(schedule, on: scheduledDate)
         }
+    }
+
+    private func presentWeekQuickAddComposer() {
+        weekQuickAddInput = ""
+        isWeekQuickAddComposerPresented = true
+    }
+
+    @MainActor
+    private func handleWeekQuickAddSubmission(openEditor: Bool) async {
+        let input = weekQuickAddInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else {
+            HapticManager.notification(.warning)
+            return
+        }
+
+        isWeekQuickAddProcessing = true
+        let parseResult = await NLPScheduleRouter.shared.parse(input)
+        isWeekQuickAddProcessing = false
+
+        if parseResult.internetUnavailable {
+            showCloudRestoreStatus("Turn on internet connection for better result.")
+        }
+
+        let parsed = parseResult.parsed
+        let scheduledDate = parsed.date ?? viewModel.selectedDate
+
+        if openEditor {
+            pasteboardManager.dismissDetection()
+            viewModel.setPendingNewScheduleNLPInput(input)
+            let selectedIndex = min(max(viewModel.selectedDayIndex, 0), 6)
+            viewModel.startAddingSchedule(on: scheduledDate, dayIndex: selectedIndex)
+            viewModel.pendingNewScheduleDate = scheduledDate
+            isWeekQuickAddComposerPresented = false
+            return
+        }
+
+        let calendarName = AppSettings.shared.defaultCalendar
+        let schedule = Schedule(
+            title: parsed.title.isEmpty ? "New Schedule" : parsed.title,
+            scheduledDate: scheduledDate,
+            repeatPattern: parsed.repeatPattern,
+            listName: calendarName,
+            tags: parsed.tags,
+            priority: parsed.priority
+        )
+        schedule.alertDeliveryOption = parsed.deliveryOption ?? .push
+        schedule.isUrgent = schedule.alertDeliveryOption == .alarm
+        schedule.earlyReminderMinutes = parsed.earlyReminderMinutes
+
+        viewModel.addSchedule(schedule)
+        pasteboardManager.dismissDetection()
+        viewModel.focus(on: scheduledDate)
+        isWeekQuickAddComposerPresented = false
+        weekQuickAddInput = ""
     }
 }
 
@@ -1065,6 +1275,113 @@ private struct CloudRestorePromptView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .interactiveDismissDisabled(true)
+    }
+}
+
+private struct WeekQuickAddComposerView: View {
+    @Binding var inputText: String
+    let isProcessing: Bool
+    var onSave: () -> Void
+    var onReview: () -> Void
+
+    @FocusState private var isInputFocused: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    private var trimmedInput: String {
+        inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isActionDisabled: Bool {
+        trimmedInput.isEmpty || isProcessing
+    }
+
+    private var actionButtonOpacity: Double {
+        isActionDisabled ? 0.58 : 1
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Type a natural sentence and create instantly, or review before saving.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                TextField(
+                    "Type schedule, e.g. call mom tomorrow 8pm #family",
+                    text: $inputText,
+                    axis: .vertical
+                )
+                .lineLimit(3...6)
+                .padding(.top, 4)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                )
+                .focused($isInputFocused)
+
+                HStack(spacing: 10) {
+                    Button {
+                        guard !isActionDisabled else { return }
+                        onSave()
+                    } label: {
+                        Label("Save", systemImage: "checkmark")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppTheme.accent)
+                    .opacity(actionButtonOpacity)
+                    .allowsHitTesting(!isActionDisabled)
+
+                    Button {
+                        guard !isActionDisabled else { return }
+                        onReview()
+                    } label: {
+                        Label("Review", systemImage: "square.and.pencil")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .opacity(actionButtonOpacity)
+                    .allowsHitTesting(!isActionDisabled)
+                }
+                .controlSize(.large)
+
+                if isProcessing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Analyzing your request...")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .navigationTitle("Quick Add")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isProcessing)
+                }
+            }
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    isInputFocused = true
+                }
+            }
+        }
     }
 }
 

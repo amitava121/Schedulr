@@ -17,6 +17,12 @@ struct NLPScheduleParser {
         var earlyReminderMinutes: Int?
     }
 
+    private struct LinguisticSignal {
+        var nouns: [String] = []
+        var verbs: [String] = []
+        var keywords: [String] = []
+    }
+
     private static let timeIndicatorRegexes: [NSRegularExpression] = {
         [
             #"\d{1,2}:\d{2}"#,
@@ -56,8 +62,8 @@ struct NLPScheduleParser {
             #"\s*(?:at|@)\s+\d{1,2}(?:[:\.,]\d{2})?\s*(?:am|pm)?"#,
             #"\s*\b\d{1,2}(?:[:\.,]\d{2})\b"#,
             #"\s*\.\d{2}\b"#,
-            #"\s*(?:tomorrow|today|tonight|next week|next month)"#,
-            #"\s*(?:daily|weekly|monthly|yearly|every day|every week)"#,
+            #"\s*\b(?:tomorrow|today|tonight|next\s+week|next\s+month)\b"#,
+            #"\s*\b(?:daily|weekly|monthly|yearly|every\s+day|every\s+week)\b"#,
             #"\s*(?:urgent|important|critical)"#,
             #"\s*(?:high|medium|low) priority"#,
             #"\s*(?:with\s+)?alarm\b"#,
@@ -72,12 +78,21 @@ struct NLPScheduleParser {
         var result = ParsedSchedule()
         let lowered = input.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lowered.isEmpty else { return result }
+        let linguistic = extractLinguisticSignal(from: input)
 
         // Extract date/time using NSDataDetector
         let dateResult = extractDateTime(from: input)
         var resolvedDate = dateResult.date
         let explicitTime = extractExplicitTime(from: lowered)
         var hasTime = dateResult.hasTime || explicitTime != nil
+
+        // Chrono.js local fallback parsing for richer natural-language date support.
+        if resolvedDate == nil,
+           let chrono = ChronoJSParser.parse(input)
+        {
+            resolvedDate = chrono.date
+            hasTime = hasTime || chrono.hasTime
+        }
 
         // Try relative date words if detector didn't find a date
         if resolvedDate == nil {
@@ -98,11 +113,17 @@ struct NLPScheduleParser {
             resolvedDate = merge(baseDate: baseDate, time: explicitTime)
         }
 
+        if !hasTime,
+           let normalizedBase = resolvedDate
+        {
+            resolvedDate = Calendar.current.startOfDay(for: normalizedBase)
+        }
+
         result.date = resolvedDate
         result.hasTime = hasTime
 
         // Extract priority
-        result.priority = extractPriority(from: lowered)
+        result.priority = extractPriority(from: lowered, linguistic: linguistic)
 
         // Extract repeat pattern
         result.repeatPattern = extractRepeatPattern(from: lowered)
@@ -114,10 +135,10 @@ struct NLPScheduleParser {
         result.earlyReminderMinutes = extractEarlyReminderMinutes(from: lowered)
 
         // Extract tags (#tag syntax)
-        result.tags = extractTags(from: input)
+        result.tags = extractTags(from: input, linguistic: linguistic)
 
         // Build title — remove detected metadata from the input
-        result.title = buildTitle(from: input, dateRange: dateResult.range)
+        result.title = buildTitle(from: input, dateRange: dateResult.range, linguistic: linguistic)
 
         return result
     }
@@ -294,7 +315,7 @@ struct NLPScheduleParser {
 
     // MARK: - Priority Extraction
 
-    private static func extractPriority(from text: String) -> SchedulePriority {
+    private static func extractPriority(from text: String, linguistic: LinguisticSignal) -> SchedulePriority {
         if text.contains("urgent") || text.contains("critical") || text.contains("important") || text.contains("high priority") {
             return .high
         }
@@ -309,6 +330,16 @@ struct NLPScheduleParser {
         if exclamationCount >= 3 { return .high }
         if exclamationCount >= 2 { return .medium }
         if exclamationCount >= 1 { return .low }
+
+        // NLTagger-derived keyword signal can still infer intent when explicit
+        // "priority" wording is missing.
+        let signal = Set(linguistic.keywords)
+        if !signal.isDisjoint(with: ["deadline", "asap", "critical", "urgent"]) {
+            return .high
+        }
+        if !signal.isDisjoint(with: ["review", "meeting", "appointment", "call"]) {
+            return .medium
+        }
         return .none
     }
 
@@ -380,20 +411,37 @@ struct NLPScheduleParser {
 
     // MARK: - Tag Extraction
 
-    private static func extractTags(from text: String) -> [String] {
+    private static func extractTags(from text: String, linguistic: LinguisticSignal) -> [String] {
         guard let regex = tagRegex else { return [] }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         let matches = regex.matches(in: text, options: [], range: nsRange)
-        return matches.compactMap { match -> String? in
+        var explicit = matches.compactMap { match -> String? in
             guard let range = Range(match.range(at: 1), in: text) else { return nil }
-            return String(text[range])
+            return String(text[range]).lowercased()
         }
+
+        // Add lightweight inferred tags from noun keywords when user did not
+        // provide #tags explicitly.
+        if explicit.isEmpty {
+            explicit = inferTags(from: linguistic)
+        }
+
+        return Array(NSOrderedSet(array: explicit)) as? [String] ?? explicit
     }
 
     // MARK: - Title Builder
 
-    private static func buildTitle(from input: String, dateRange: Range<String.Index>?) -> String {
+    private static func buildTitle(from input: String, dateRange: Range<String.Index>?, linguistic: LinguisticSignal) -> String {
         var title = input
+
+        // Remove detector-matched date/time from the original string before any
+        // prefix trimming to keep ranges aligned.
+        if let dateRange,
+           dateRange.lowerBound >= title.startIndex,
+           dateRange.upperBound <= title.endIndex
+        {
+            title.removeSubrange(dateRange)
+        }
 
         // Remove common prefixes
         let prefixes = ["remind me to ", "remind me ", "schedule ", "add ", "create ", "set ", "new "]
@@ -402,13 +450,6 @@ struct NLPScheduleParser {
                 title = String(title.dropFirst(prefix.count))
                 break
             }
-        }
-
-        if let dateRange,
-           dateRange.lowerBound >= title.startIndex,
-           dateRange.upperBound <= title.endIndex
-        {
-            title.removeSubrange(dateRange)
         }
 
         // Remove time-related phrases
@@ -421,6 +462,20 @@ struct NLPScheduleParser {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Remove dangling connector words left after metadata stripping.
+        title = title.replacingOccurrences(
+            of: #"\b(and|to|for|with|at|on|in|by)\b\s*$"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+
+        if title.isEmpty || title.split(separator: " ").count <= 1 {
+            let semantic = semanticTitle(from: linguistic)
+            if !semantic.isEmpty {
+                title = semantic
+            }
+        }
+
         title = title.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Capitalize first letter
@@ -429,5 +484,92 @@ struct NLPScheduleParser {
         }
 
         return title.isEmpty ? input : title
+    }
+
+    private static func inferTags(from linguistic: LinguisticSignal) -> [String] {
+        let nouns = Array(linguistic.nouns.prefix(3))
+        var inferred: [String] = []
+
+        for noun in nouns {
+            switch noun {
+            case "meeting", "report", "project", "client", "office":
+                inferred.append("work")
+            case "doctor", "dentist", "gym", "medicine", "therapy":
+                inferred.append("health")
+            case "bill", "invoice", "tax", "payment", "bank":
+                inferred.append("finance")
+            case "family", "birthday", "dinner", "friend":
+                inferred.append("personal")
+            default:
+                break
+            }
+        }
+
+        return Array(NSOrderedSet(array: inferred)) as? [String] ?? inferred
+    }
+
+    private static func semanticTitle(from linguistic: LinguisticSignal) -> String {
+        let verb = linguistic.verbs.first?.capitalized ?? ""
+        let nouns = linguistic.nouns.prefix(2).map { $0.capitalized }
+        let nounPhrase = nouns.joined(separator: " ")
+
+        if !verb.isEmpty && !nounPhrase.isEmpty {
+            return "\(verb) \(nounPhrase)"
+        }
+        if !nounPhrase.isEmpty {
+            return nounPhrase
+        }
+        return ""
+    }
+
+    private static func extractLinguisticSignal(from text: String) -> LinguisticSignal {
+        #if canImport(NaturalLanguage)
+        var signal = LinguisticSignal()
+        let lowercased = text.lowercased()
+
+        let tagger = NLTagger(tagSchemes: [.lexicalClass, .lemma])
+        tagger.string = lowercased
+
+        let range = lowercased.startIndex..<lowercased.endIndex
+        let options: NLTagger.Options = [.omitWhitespace, .omitPunctuation]
+
+        tagger.enumerateTags(in: range, unit: .word, scheme: .lexicalClass, options: options) { tag, tokenRange in
+            let token = String(lowercased[tokenRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard token.count > 1 else { return true }
+
+            let lemma = tagger.tag(at: tokenRange.lowerBound, unit: .word, scheme: .lemma).0?.rawValue ?? token
+            let normalized = lemma.lowercased()
+
+            if isStopWord(normalized) { return true }
+
+            switch tag {
+            case .some(.noun), .some(.personalName), .some(.placeName), .some(.organizationName):
+                signal.nouns.append(normalized)
+            case .some(.verb):
+                signal.verbs.append(normalized)
+            case .some(.adjective):
+                signal.keywords.append(normalized)
+            default:
+                signal.keywords.append(normalized)
+            }
+            return true
+        }
+
+        signal.nouns = Array(NSOrderedSet(array: signal.nouns)) as? [String] ?? signal.nouns
+        signal.verbs = Array(NSOrderedSet(array: signal.verbs)) as? [String] ?? signal.verbs
+        signal.keywords = Array(NSOrderedSet(array: signal.keywords)) as? [String] ?? signal.keywords
+        return signal
+        #else
+        return LinguisticSignal()
+        #endif
+    }
+
+    private static func isStopWord(_ token: String) -> Bool {
+        let stopWords: Set<String> = [
+            "a", "an", "the", "to", "for", "with", "at", "on", "in", "by", "of", "and", "or",
+            "me", "my", "is", "are", "be", "this", "that", "tomorrow", "today", "tonight",
+            "am", "pm", "minute", "minutes", "min", "mins", "priority", "reminder"
+        ]
+        return stopWords.contains(token)
     }
 }

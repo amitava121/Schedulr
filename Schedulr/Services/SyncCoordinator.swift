@@ -60,8 +60,8 @@ final class SyncCoordinator {
         }
     }
 
-    func syncNow(viewModel: ScheduleViewModel) async {
-        await performFullSync(viewModel: viewModel)
+    func syncNow(viewModel: ScheduleViewModel, userInitiated: Bool = true) async {
+        await performFullSync(viewModel: viewModel, userInitiated: userInitiated)
         await drainOfflineQueue(viewModel: viewModel)
     }
 
@@ -70,43 +70,45 @@ final class SyncCoordinator {
 
         do {
             let remoteDeltas = try await FirebaseSyncService.shared.fetchPendingDeltas()
-            guard !remoteDeltas.isEmpty else { return }
-
             var confirmedIDs: [String] = []
 
-            for document in remoteDeltas {
-                let remote = document.delta
-                guard let scheduleID = UUID(uuidString: remote.scheduleID) else { continue }
+            if !remoteDeltas.isEmpty {
+                for document in remoteDeltas {
+                    let remote = document.delta
+                    guard let scheduleID = UUID(uuidString: remote.scheduleID) else { continue }
 
-                if let local = viewModel.localDelta(for: scheduleID), local.syncVersion != remote.syncVersion {
-                    let outcome = SyncConflictResolver.resolve(local: local, remote: remote)
-                    if SyncConflictResolver.isConflictUserVisible(local: local, remote: remote) {
-                        let conflict = ConflictRecord(scheduleID: scheduleID, local: local, remote: remote)
-                        if !pendingConflicts.contains(where: { $0.scheduleID == scheduleID }) {
-                            pendingConflicts.append(conflict)
+                    if let local = viewModel.localDelta(for: scheduleID), local.syncVersion != remote.syncVersion {
+                        let outcome = SyncConflictResolver.resolve(local: local, remote: remote)
+                        if SyncConflictResolver.isConflictUserVisible(local: local, remote: remote) {
+                            let conflict = ConflictRecord(scheduleID: scheduleID, local: local, remote: remote)
+                            if !pendingConflicts.contains(where: { $0.scheduleID == scheduleID }) {
+                                pendingConflicts.append(conflict)
+                            }
                         }
+
+                        switch outcome {
+                        case .useLocal:
+                            viewModel.applyResolvedDelta(
+                                SyncConflictResolver.localWithUnion(local: local, remote: remote)
+                            )
+                        case .useRemote:
+                            viewModel.applyResolvedDelta(
+                                SyncConflictResolver.remoteWithUnion(local: local, remote: remote)
+                            )
+                        case .merge(let merged):
+                            viewModel.applyResolvedDelta(merged)
+                        }
+                    } else {
+                        viewModel.applyResolvedDelta(remote)
                     }
 
-                    switch outcome {
-                    case .useLocal:
-                        viewModel.applyResolvedDelta(
-                            SyncConflictResolver.localWithUnion(local: local, remote: remote)
-                        )
-                    case .useRemote:
-                        viewModel.applyResolvedDelta(
-                            SyncConflictResolver.remoteWithUnion(local: local, remote: remote)
-                        )
-                    case .merge(let merged):
-                        viewModel.applyResolvedDelta(merged)
-                    }
-                } else {
-                    viewModel.applyResolvedDelta(remote)
+                    confirmedIDs.append(document.id)
                 }
-
-                confirmedIDs.append(document.id)
             }
 
-            try await FirebaseSyncService.shared.deleteConfirmedDeltas(confirmedIDs)
+            if !confirmedIDs.isEmpty {
+                try await FirebaseSyncService.shared.deleteConfirmedDeltas(confirmedIDs)
+            }
 
             if let backupData = viewModel.exportBackupData() {
                 let nextVersion = viewModel.currentGlobalSyncVersion() + 1
@@ -128,19 +130,27 @@ final class SyncCoordinator {
         }
     }
 
-    func performFullSync(viewModel: ScheduleViewModel) async {
+    func performFullSync(viewModel: ScheduleViewModel, userInitiated: Bool = true) async {
         attachedViewModel = viewModel
-        guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard FirebaseSyncService.shared.isSignedIn else {
+            if syncState == .syncing {
+                syncState = .idle
+            }
+            return
+        }
 
-        syncState = .syncing
+        if userInitiated {
+            syncState = .syncing
+        }
+        defer {
+            if syncState == .syncing {
+                syncState = pendingConflicts.isEmpty ? .idle : .conflict
+            }
+        }
 
         let dirty = viewModel.consumeDirtyDeltas()
         await pushChanges(dirtySchedules: dirty, viewModel: viewModel)
         await pullAndMerge(viewModel: viewModel)
-
-        if syncState == .syncing {
-            syncState = pendingConflicts.isEmpty ? .idle : .conflict
-        }
     }
 
     func drainOfflineQueue(viewModel: ScheduleViewModel) async {

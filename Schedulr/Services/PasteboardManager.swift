@@ -33,6 +33,7 @@ final class PasteboardManager {
     var hasQuickAddContent: Bool { detectedText != nil }
 
     private var lastChangeCount: Int = 0
+    private var consumedChangeCount: Int?
     #if canImport(UIKit)
     private var timer: Timer?
     #endif
@@ -45,7 +46,7 @@ final class PasteboardManager {
         #if canImport(UIKit)
         let pb = UIPasteboard.general
         lastChangeCount = pb.changeCount
-        detectedText = pb.hasStrings ? "Pending clipboard content..." : nil
+        detectedText = shouldOfferQuickAdd(for: pb) ? "Pending clipboard content..." : nil
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkPasteboard()
         }
@@ -63,11 +64,21 @@ final class PasteboardManager {
         detectedText = nil
     }
 
+    /// Marks the current clipboard state as consumed so quick-add stays hidden
+    /// until the user copies new content.
+    func markCurrentClipboardAsConsumed() {
+        #if canImport(UIKit)
+        let pb = UIPasteboard.general
+        consumedChangeCount = pb.changeCount
+        detectedText = nil
+        #endif
+    }
+
     // MARK: - Quick Add from Pasteboard
 
-    func parseAndCreateSchedule() -> NLPScheduleParser.ParsedSchedule? {
+    func parseAndCreateSchedule() async -> NLPScheduleRouter.ParseResult? {
         guard let text = detectedText else { return nil }
-        let result = NLPScheduleParser.parse(text)
+        let result = await NLPScheduleRouter.shared.parse(text)
         detectedText = nil
         return result
     }
@@ -80,25 +91,27 @@ final class PasteboardManager {
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount
 
-        // iOS 16+: Instead of reading pb.string directly (which triggers the prompt),
-        // we just check if it has *any* strings.
-        if pb.hasStrings {
-            // Because we can't reliably read the string silently, we just flag
-            // that *some* text is available. Tapping quick-add will do the actual read.
+        if shouldOfferQuickAdd(for: pb) {
             detectedText = "Pending clipboard content..."
         } else {
             detectedText = nil
         }
     }
+
+    private func shouldOfferQuickAdd(for pasteboard: UIPasteboard) -> Bool {
+        guard pasteboard.hasStrings else { return false }
+        guard let consumedChangeCount else { return true }
+        return pasteboard.changeCount != consumedChangeCount
+    }
     #endif
 
     /// Parses the actual clipboard string. This is called *after* user interaction
     /// to avoid incessant background permission prompts on iOS 16+.
-    func parseAndCreateScheduleFromActualPasteboard() -> NLPScheduleParser.ParsedSchedule? {
+    func parseAndCreateScheduleFromActualPasteboard() async -> NLPScheduleRouter.ParseResult? {
         #if canImport(UIKit)
         let pb = UIPasteboard.general
         guard let text = pb.string, !text.isEmpty else { return nil }
-        let result = NLPScheduleParser.parse(text)
+        let result = await NLPScheduleRouter.shared.parse(text)
         detectedText = nil
         return result
         #else

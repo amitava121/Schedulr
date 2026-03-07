@@ -213,7 +213,7 @@ struct PremiumAppBackground: View {
 
             RadialGradient(
                 colors: [
-                    Color(red: 0.34, green: 0.52, blue: 0.92).opacity(0.24),
+                    AppTheme.accent.opacity(0.24),
                     Color.clear
                 ],
                 center: .topLeading,
@@ -224,7 +224,7 @@ struct PremiumAppBackground: View {
 
             RadialGradient(
                 colors: [
-                    Color(red: 0.52, green: 0.38, blue: 0.78).opacity(0.14),
+                    AppTheme.accentSoft.opacity(0.14),
                     Color.clear
                 ],
                 center: .topTrailing,

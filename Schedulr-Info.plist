@@ -37,6 +37,12 @@
 	<true/>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Schedulr uses the camera so you can capture and set a profile photo.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Schedulr accesses your photo library so you can choose a profile photo.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Schedulr may save edited profile images to your library when you choose to do so.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

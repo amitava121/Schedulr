@@ -28,6 +28,7 @@ struct SchedulrApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .id(appSettings.accentColorHex)
                 .preferredColorScheme(appSettings.preferredColorScheme)
                 .tint(appSettings.accentColor)
         }
