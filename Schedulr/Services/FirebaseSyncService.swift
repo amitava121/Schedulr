@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SwiftData
 import FirebaseAuth
 import FirebaseCore
 import FirebaseFirestore
@@ -372,6 +373,7 @@ final class FirebaseSyncService {
     private static let firestoreDatabaseInfoKey = "FIRESTORE_DATABASE_ID"
     private static let legacyFirestoreDatabaseInfoKey = "FirestoreDatabaseID"
     private static let inlineBackupByteLimit = 700_000
+    private static let legacyGranularMigrationStateKey = "sync.legacyGranularMigrationState.v1"
 
     private static let iso8601WithFractionalSecondsFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -504,6 +506,11 @@ final class FirebaseSyncService {
     var signedInEmail: String? {
         guard isFirebaseConfigured else { return nil }
         return Auth.auth().currentUser?.email
+    }
+
+    var signedInUserID: String? {
+        guard isFirebaseConfigured else { return nil }
+        return Auth.auth().currentUser?.uid
     }
 
     private func fallbackDisplayName(from email: String?) -> String {
@@ -829,6 +836,41 @@ final class FirebaseSyncService {
 
     func clearBackupUpdateHandler() {
         backupUpdateHandler = nil
+    }
+
+    /// Executes a one-time migration from legacy backup blobs to granular schedule docs.
+    func migrateLegacyDataToGranular(context: ModelContext) async {
+        guard FirebaseApp.app() != nil else { return }
+        guard let user = Auth.auth().currentUser else { return }
+
+        let migrationKey = "\(Self.legacyGranularMigrationStateKey).\(user.uid)"
+        if UserDefaults.standard.bool(forKey: migrationKey) {
+            RealtimeSyncCoordinator.shared.startListening(context: context)
+            return
+        }
+
+        let result = await downloadBackupWithResult()
+        guard case .success(let backup) = result, !backup.data.isEmpty else {
+            return
+        }
+
+        do {
+            let userDocument = firestore.collection("users").document(user.uid)
+            try await persistStructuredBackupData(
+                from: backup.data,
+                userDocument: userDocument,
+                globalSyncVersion: backup.globalSyncVersion
+            )
+            try await userDocument.setData([
+                "granularMigrationCompletedAt": FieldValue.serverTimestamp(),
+                "writerDeviceID": currentDeviceID
+            ], merge: true)
+
+            UserDefaults.standard.set(true, forKey: migrationKey)
+            RealtimeSyncCoordinator.shared.startListening(context: context)
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
     }
 
     func signIn(email: String, password: String) async {

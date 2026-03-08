@@ -57,6 +57,7 @@ final class ScheduleViewModel {
     private static let lastRestoreCompletedAtKey = "scheduleLastRestoreCompletedAt.v1"
     private static let globalSyncVersionKey = "sync.globalVersion.v1"
     private static let lastAutoCloudUploadAtKey = "sync.lastAutoCloudUploadAt.v1"
+    private static let autoSyncUnlockedAccountIDsKey = "sync.autoUnlockedAccountIDs.v1"
     private static let autoSyncMinBatteryLevel: Float = 0.35
     private static let autoSyncIntervalWithChanges: TimeInterval = 90
     private static let autoSyncIntervalWithChangesWhileCharging: TimeInterval = 60
@@ -528,7 +529,8 @@ final class ScheduleViewModel {
     func importBackupData(
         _ data: Data,
         includeSchedules: Bool = true,
-        includeSettings: Bool = true
+        includeSettings: Bool = true,
+        preferRemoteOnConflict: Bool = false
     ) -> RestoreResult {
         guard let modelContext else { return RestoreResult(failure: .noModelContext) }
         let decoder = JSONDecoder()
@@ -588,7 +590,10 @@ final class ScheduleViewModel {
             let remoteSchedule = scheduleFromBackupItem(backupItem)
 
             if let existing = existingByID[backupItem.id] {
-                switch SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: existing, remoteSchedule: remoteSchedule) {
+                let resolution: BlobConflictAction = preferRemoteOnConflict
+                    ? .keepRemote
+                    : SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: existing, remoteSchedule: remoteSchedule)
+                switch resolution {
                 case .keepLocal:
                     result.skippedCount += 1
                 case .keepRemote:
@@ -622,7 +627,10 @@ final class ScheduleViewModel {
             if let sameIdentitySchedule = existingByID.values.first(where: {
                 $0.title == backupItem.title && $0.scheduledDate == backupItem.scheduledDate
             }) {
-                switch SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: sameIdentitySchedule, remoteSchedule: remoteSchedule) {
+                let resolution: BlobConflictAction = preferRemoteOnConflict
+                    ? .keepRemote
+                    : SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: sameIdentitySchedule, remoteSchedule: remoteSchedule)
+                switch resolution {
                 case .keepLocal:
                     result.skippedCount += 1
                 case .keepRemote:
@@ -728,6 +736,7 @@ final class ScheduleViewModel {
     func autoSyncCloudBackupIfEligible(requirePendingScheduleChanges: Bool = false) {
         guard !isCloudRestoreInProgress else { return }
         guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard isAutoSyncUnlockedForCurrentAccount() else { return }
         guard shouldRunAutomaticCloudSync(requirePendingScheduleChanges: requirePendingScheduleChanges) else { return }
 
         syncNowWithCoordinator(userInitiated: false)
@@ -770,7 +779,13 @@ final class ScheduleViewModel {
                 timeoutTask.cancel()
                 self.isSyncNowInProgress = false
             }
-            await self.syncCoordinator.syncNow(viewModel: self, userInitiated: userInitiated)
+            let report = await self.syncCoordinator.syncNow(viewModel: self, userInitiated: userInitiated)
+            if report.succeeded {
+                FirebaseSyncService.shared.lastSyncedAt = Date()
+            }
+            if userInitiated, report.succeeded {
+                self.unlockAutoSyncForCurrentAccount()
+            }
             self.pendingConflictScheduleIDs = Array(Set(self.syncCoordinator.pendingConflictScheduleIDs))
         }
     }
@@ -2026,10 +2041,31 @@ final class ScheduleViewModel {
 
         guard !isCloudRestoreInProgress else { return }
         guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard isAutoSyncUnlockedForCurrentAccount() else { return }
         guard !dirtyScheduleIDs.isEmpty else { return }
         guard shouldRunAutomaticCloudSync(requirePendingScheduleChanges: true) else { return }
 
         syncNowWithCoordinator(userInitiated: false)
+    }
+
+    private func isAutoSyncUnlockedForCurrentAccount() -> Bool {
+        guard let accountID = FirebaseSyncService.shared.signedInUserID, !accountID.isEmpty else {
+            return false
+        }
+        let unlocked = UserDefaults.standard.stringArray(forKey: Self.autoSyncUnlockedAccountIDsKey) ?? []
+        return Set(unlocked).contains(accountID)
+    }
+
+    private func unlockAutoSyncForCurrentAccount() {
+        guard let accountID = FirebaseSyncService.shared.signedInUserID, !accountID.isEmpty else {
+            return
+        }
+
+        var unlocked = Set(UserDefaults.standard.stringArray(forKey: Self.autoSyncUnlockedAccountIDsKey) ?? [])
+        guard !unlocked.contains(accountID) else { return }
+        unlocked.insert(accountID)
+        UserDefaults.standard.set(Array(unlocked), forKey: Self.autoSyncUnlockedAccountIDsKey)
+        Self.syncLogger.info("Auto-sync unlocked after manual sync for account \(accountID, privacy: .private(mask: .hash))")
     }
 
     private func shouldRunAutomaticCloudSync(requirePendingScheduleChanges: Bool) -> Bool {

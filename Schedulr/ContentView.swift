@@ -291,7 +291,8 @@ struct ContentView: View {
                                 let result = viewModel.importBackupData(
                                     data,
                                     includeSchedules: restoreSchedulesFromCloud,
-                                    includeSettings: restoreSettingsFromCloud
+                                    includeSettings: restoreSettingsFromCloud,
+                                    preferRemoteOnConflict: true
                                 )
                                 showCloudRestoreStatus(result.userMessage)
                                 redirectAfterCloudRestoreFlowIfNeeded()

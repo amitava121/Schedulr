@@ -791,7 +791,8 @@ struct FirebaseAccountView: View {
                                 let restoreResult = viewModel.importBackupData(
                                     backup.data,
                                     includeSchedules: true,
-                                    includeSettings: true
+                                    includeSettings: true,
+                                    preferRemoteOnConflict: true
                                 )
                                 manualRestoreStatusMessage = restoreResult.userMessage
 
@@ -814,7 +815,8 @@ struct FirebaseAccountView: View {
                                 let restoreResult = viewModel.importBackupData(
                                     backup.data,
                                     includeSchedules: true,
-                                    includeSettings: true
+                                    includeSettings: true,
+                                    preferRemoteOnConflict: true
                                 )
                                 manualRestoreStatusMessage = restoreResult.userMessage + " (cached)"
 
@@ -1375,158 +1377,6 @@ struct FirebaseAccountView: View {
 }
 
 #if os(iOS)
-final class PhotoPickerManager: NSObject, PHPickerViewControllerDelegate {
-    static let shared = PhotoPickerManager()
-
-    private var completion: ((UIImage?) -> Void)?
-
-    func present(completion: @escaping (UIImage?) -> Void) {
-        self.completion = completion
-
-        var config = PHPickerConfiguration()
-        config.filter = .images
-        config.selectionLimit = 1
-
-        let picker = PHPickerViewController(configuration: config)
-        picker.delegate = self
-
-        DispatchQueue.main.async {
-            guard let topVC = self.topViewController() else {
-                completion(nil)
-                self.completion = nil
-                return
-            }
-            topVC.present(picker, animated: true)
-        }
-    }
-
-    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-        guard let provider = results.first?.itemProvider else {
-            picker.dismiss(animated: true) { self.cleanupAndComplete(nil) }
-            return
-        }
-
-        picker.dismiss(animated: true) {
-            self.extractImage(from: provider)
-        }
-    }
-
-    private func extractImage(from provider: NSItemProvider) {
-        if provider.canLoadObject(ofClass: UIImage.self) {
-            provider.loadObject(ofClass: UIImage.self) { object, _ in
-                if let image = object as? UIImage {
-                    self.cleanupAndComplete(image)
-                } else {
-                    self.extractDataFallback(from: provider)
-                }
-            }
-            return
-        }
-
-        extractDataFallback(from: provider)
-    }
-
-    private func extractDataFallback(from provider: NSItemProvider) {
-        let identifier = UTType.image.identifier
-        guard provider.hasItemConformingToTypeIdentifier(identifier) else {
-            cleanupAndComplete(nil)
-            return
-        }
-
-        provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, _ in
-            if let data, let image = UIImage(data: data) {
-                self.cleanupAndComplete(image)
-                return
-            }
-
-            provider.loadFileRepresentation(forTypeIdentifier: identifier) { url, _ in
-                guard let url,
-                      let data = try? Data(contentsOf: url),
-                      let image = UIImage(data: data)
-                else {
-                    self.cleanupAndComplete(nil)
-                    return
-                }
-                self.cleanupAndComplete(image)
-            }
-        }
-    }
-
-    private func cleanupAndComplete(_ image: UIImage?) {
-        DispatchQueue.main.async {
-            self.completion?(image)
-            self.completion = nil
-        }
-    }
-
-    private func topViewController() -> UIViewController? {
-        guard let windowScene = UIApplication.shared.connectedScenes
-            .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-              let root = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
-        else {
-            return nil
-        }
-
-        var top = root
-        while let presented = top.presentedViewController {
-            top = presented
-        }
-        return top
-    }
-}
-
-final class UniversalCropManager: NSObject {
-    static let shared = UniversalCropManager()
-
-    func presentCrop(for image: UIImage, completion: @escaping (Data?) -> Void) {
-        DispatchQueue.main.async {
-            let cropView = ProfileImageCropView(image: image) { croppedData in
-                self.dismissAndComplete(data: croppedData, completion: completion)
-            } onCancel: {
-                self.dismissAndComplete(data: nil, completion: completion)
-            }
-
-            let hostingController = UIHostingController(rootView: cropView)
-            hostingController.modalPresentationStyle = .fullScreen
-            hostingController.view.backgroundColor = .black
-
-            guard let topVC = self.topViewController() else {
-                completion(nil)
-                return
-            }
-            topVC.present(hostingController, animated: true)
-        }
-    }
-
-    private func dismissAndComplete(data: Data?, completion: @escaping (Data?) -> Void) {
-        DispatchQueue.main.async {
-            guard let topVC = self.topViewController() else {
-                completion(data)
-                return
-            }
-
-            topVC.dismiss(animated: true) {
-                completion(data)
-            }
-        }
-    }
-
-    private func topViewController() -> UIViewController? {
-        guard let windowScene = UIApplication.shared.connectedScenes
-            .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-              let root = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
-        else {
-            return nil
-        }
-
-        var top = root
-        while let presented = top.presentedViewController {
-            top = presented
-        }
-        return top
-    }
-}
-
 private struct CameraImagePicker: UIViewControllerRepresentable {
     let onPicked: (UIImage?) -> Void
 
@@ -1673,62 +1523,21 @@ private struct AccountProfileEditorSheet: View {
                 }
                 .confirmationDialog("Profile Image", isPresented: $showImageSourceDialog, titleVisibility: .visible) {
                 Button("Select from Photos") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        PhotoDiagnosticsStore.set("diag.lastPickerFlow", "requested")
-                        PhotoDiagnosticsStore.set("diag.lastPickerPath", "isolated-window")
-                        PhotoDiagnosticsStore.setNow("diag.lastPickerRequestedAt")
-                        PhotoDiagnosticsStore.set("diag.lastPickerRequestReason", "isolated-phpicker-window")
-                        PhotoDiagnosticsStore.increment("diag.phpickerPresentCount")
-                        PhotoDiagnosticsStore.set("diag.lastPHPickerResult", "pending-native-photospicker")
-                        PhotoDiagnosticsStore.setNow("diag.lastPHPickerPresentedAt")
-
-                        PhotoPickerManager.shared.present { selectedImage in
-                            DispatchQueue.main.async {
-                                guard let selectedImage else {
-                                    PhotoDiagnosticsStore.set("diag.lastPHPickerResult", "cancel-or-no-selection")
-                                    PhotoDiagnosticsStore.setNow("diag.lastPHPickerResultAt")
-                                    return
-                                }
-
-                                PhotoDiagnosticsStore.set("diag.lastPickerFlow", "presented")
-                                PhotoDiagnosticsStore.set("diag.lastPickerPath", "isolated-window")
-                                PhotoDiagnosticsStore.set("diag.lastPHPickerResult", "selected")
-                                PhotoDiagnosticsStore.increment("diag.phpickerSelectionCount")
-                                PhotoDiagnosticsStore.setNow("diag.lastPHPickerResultAt")
-
-                                UniversalCropManager.shared.presentCrop(for: selectedImage) { croppedData in
-                                    guard let croppedData else {
-                                        PhotoDiagnosticsStore.set("diag.lastCropResult", "cancel")
-                                        PhotoDiagnosticsStore.increment("diag.cropCancelCount")
-                                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
-                                        return
-                                    }
-                                    DispatchQueue.main.async {
-                                        PhotoDiagnosticsStore.set("diag.lastCropResult", "use")
-                                        PhotoDiagnosticsStore.set("diag.lastCropBytes", String(croppedData.count))
-                                        PhotoDiagnosticsStore.increment("diag.cropUseCount")
-                                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
-                                        withAnimation {
-                                            imageData = croppedData
-                                        }
-                                    }
-                                }
+                    // Wait for the action sheet to physically clear the screen.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        SafeImageFlowManager.shared.startLibraryFlow { croppedData in
+                            if let data = croppedData {
+                                DispatchQueue.main.async { self.imageData = data }
                             }
                         }
                     }
                 }
                 if UIImagePickerController.isSourceTypeAvailable(.camera) {
                     Button("Open Camera") {
-                        PhotoDiagnosticsStore.set("diag.lastPickerFlow", "requested")
-                        PhotoDiagnosticsStore.set("diag.lastPickerPath", "camera")
-                        PhotoDiagnosticsStore.setNow("diag.lastPickerRequestedAt")
                         requestAndOpenCameraIfAllowed()
                     }
                 }
                 Button("Select from Files") {
-                    PhotoDiagnosticsStore.set("diag.lastPickerFlow", "requested")
-                    PhotoDiagnosticsStore.set("diag.lastPickerPath", "files")
-                    PhotoDiagnosticsStore.setNow("diag.lastPickerRequestedAt")
                     showFileImporter = true
                 }
                 Button("Cancel", role: .cancel) {}
@@ -1739,38 +1548,20 @@ private struct AccountProfileEditorSheet: View {
                 Text(cameraPermissionMessage)
             }
                 .fullScreenCover(isPresented: $showCameraPicker) {
-                CameraImagePicker { image in
-                    showCameraPicker = false
-
-                    if let image {
-                        PhotoDiagnosticsStore.set("diag.lastCameraPickerResult", "selected")
-                        PhotoDiagnosticsStore.setNow("diag.lastCameraPickerAt")
-
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            UniversalCropManager.shared.presentCrop(for: image) { croppedData in
-                                guard let croppedData else {
-                                    PhotoDiagnosticsStore.set("diag.lastCropResult", "cancel")
-                                    PhotoDiagnosticsStore.increment("diag.cropCancelCount")
-                                    PhotoDiagnosticsStore.setNow("diag.lastCropAt")
-                                    return
-                                }
-                                DispatchQueue.main.async {
-                                    PhotoDiagnosticsStore.set("diag.lastCropResult", "use")
-                                    PhotoDiagnosticsStore.set("diag.lastCropBytes", String(croppedData.count))
-                                    PhotoDiagnosticsStore.increment("diag.cropUseCount")
-                                    PhotoDiagnosticsStore.setNow("diag.lastCropAt")
-                                    withAnimation {
-                                        imageData = croppedData
+                    CameraImagePicker { image in
+                        showCameraPicker = false
+                        if let image {
+                            // Wait for the camera sheet to fully dismiss.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                SafeImageFlowManager.shared.startCropFlow(image: image) { croppedData in
+                                    if let data = croppedData {
+                                        DispatchQueue.main.async { self.imageData = data }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        PhotoDiagnosticsStore.set("diag.lastCameraPickerResult", "cancel")
-                        PhotoDiagnosticsStore.setNow("diag.lastCameraPickerAt")
                     }
-                }
-                .ignoresSafeArea()
+                    .ignoresSafeArea()
                 }
                 .onAppear {
                 PhotoDiagnosticsStore.setNow("diag.profileEditorOpenedAt")
@@ -1781,45 +1572,17 @@ private struct AccountProfileEditorSheet: View {
                 allowedContentTypes: [.image],
                 allowsMultipleSelection: false
             ) { result in
-                guard case .success(let urls) = result,
-                      let url = urls.first
-                else {
-                    PhotoDiagnosticsStore.set("diag.lastFileImporterResult", "cancel-or-failure")
-                    PhotoDiagnosticsStore.increment("diag.fileImporterFailureCount")
-                    PhotoDiagnosticsStore.setNow("diag.lastFileImporterAt")
-                    return
-                }
-
+                guard case .success(let urls) = result, let url = urls.first else { return }
                 let started = url.startAccessingSecurityScopedResource()
                 defer { if started { url.stopAccessingSecurityScopedResource() } }
 
-                guard let data = try? Data(contentsOf: url),
-                      let uiImage = UIImage(data: data)
-                else {
-                    PhotoDiagnosticsStore.set("diag.lastFileImporterResult", "decode-failed")
-                    PhotoDiagnosticsStore.increment("diag.fileImporterFailureCount")
-                    PhotoDiagnosticsStore.setNow("diag.lastFileImporterAt")
-                    return
-                }
-                PhotoDiagnosticsStore.set("diag.lastFileImporterResult", "selected")
-                PhotoDiagnosticsStore.set("diag.lastFileImporterBytes", String(data.count))
-                PhotoDiagnosticsStore.increment("diag.fileImporterSelectionCount")
-                PhotoDiagnosticsStore.setNow("diag.lastFileImporterAt")
+                guard let data = try? Data(contentsOf: url), let uiImage = UIImage(data: data) else { return }
 
-                UniversalCropManager.shared.presentCrop(for: uiImage) { croppedData in
-                    guard let croppedData else {
-                        PhotoDiagnosticsStore.set("diag.lastCropResult", "cancel")
-                        PhotoDiagnosticsStore.increment("diag.cropCancelCount")
-                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        PhotoDiagnosticsStore.set("diag.lastCropResult", "use")
-                        PhotoDiagnosticsStore.set("diag.lastCropBytes", String(croppedData.count))
-                        PhotoDiagnosticsStore.increment("diag.cropUseCount")
-                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
-                        withAnimation {
-                            imageData = croppedData
+                // Wait for the files sheet to fully dismiss.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    SafeImageFlowManager.shared.startCropFlow(image: uiImage) { croppedData in
+                        if let data = croppedData {
+                            DispatchQueue.main.async { self.imageData = data }
                         }
                     }
                 }
@@ -2013,6 +1776,126 @@ private struct ProfileImageCropView: View {
         }
 
         return result.jpegData(compressionQuality: 0.85) ?? Data()
+    }
+}
+
+final class SafeImageFlowManager: NSObject, PHPickerViewControllerDelegate {
+    static let shared = SafeImageFlowManager()
+
+    private var completion: ((Data?) -> Void)?
+    private var overlayWindow: UIWindow?
+    private weak var activePicker: PHPickerViewController?
+    private weak var activeCropVC: UIViewController?
+
+    // --- PHOTO LIBRARY PATH ---
+    func startLibraryFlow(completion: @escaping (Data?) -> Void) {
+        self.completion = completion
+
+        guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else { return }
+
+        let window = UIWindow(windowScene: windowScene)
+        let rootVC = UIViewController()
+        rootVC.view.backgroundColor = .clear
+        window.rootViewController = rootVC
+
+        // CRITICAL FIX: Do NOT use makeKeyAndVisible().
+        // By only using .isHidden = false, this window floats above the app but NEVER steals the responder chain.
+        // SwiftUI is completely blind to it, so Face ID will never crash your underlying sheet.
+        window.windowLevel = .normal + 1
+        window.isHidden = false
+        self.overlayWindow = window
+
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = self
+
+        rootVC.present(picker, animated: true)
+        self.activePicker = picker
+    }
+
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        guard let provider = results.first?.itemProvider else {
+            self.finishFlow(data: nil)
+            return
+        }
+
+        if provider.canLoadObject(ofClass: UIImage.self) {
+            provider.loadObject(ofClass: UIImage.self) { obj, _ in
+                DispatchQueue.main.async { self.transitionToCrop(image: obj as? UIImage, presenter: picker) }
+            }
+        } else {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                DispatchQueue.main.async {
+                    let image = data.flatMap(UIImage.init)
+                    self.transitionToCrop(image: image, presenter: picker)
+                }
+            }
+        }
+    }
+
+    private func transitionToCrop(image: UIImage?, presenter: UIViewController) {
+        guard let image = image else {
+            finishFlow(data: nil)
+            return
+        }
+
+        let cropView = ProfileImageCropView(image: image) { [weak self] croppedData in
+            self?.finishFlow(data: croppedData)
+        } onCancel: { [weak self] in
+            // Smoothly drop the crop view so they can pick a different photo
+            self?.activeCropVC?.dismiss(animated: true)
+        }
+
+        let hostingVC = UIHostingController(rootView: cropView)
+        hostingVC.modalPresentationStyle = .fullScreen
+        hostingVC.view.backgroundColor = .black
+
+        self.activeCropVC = hostingVC
+        presenter.present(hostingVC, animated: true)
+    }
+
+    // --- CAMERA & FILES PATH ---
+    func startCropFlow(image: UIImage, completion: @escaping (Data?) -> Void) {
+        self.completion = completion
+
+        guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else { return }
+
+        let window = UIWindow(windowScene: windowScene)
+        let rootVC = UIViewController()
+        rootVC.view.backgroundColor = .clear
+        window.rootViewController = rootVC
+
+        // Keep architecture perfectly consistent
+        window.windowLevel = .normal + 1
+        window.isHidden = false
+        self.overlayWindow = window
+
+        transitionToCrop(image: image, presenter: rootVC)
+    }
+
+    private func finishFlow(data: Data?) {
+        DispatchQueue.main.async {
+            // Dismissing all modals attached to the floating window smoothly
+            if let rootVC = self.overlayWindow?.rootViewController, rootVC.presentedViewController != nil {
+                rootVC.dismiss(animated: true) {
+                    self.destroyOverlay(data: data)
+                }
+            } else {
+                self.destroyOverlay(data: data)
+            }
+        }
+    }
+
+    private func destroyOverlay(data: Data?) {
+        // Because this was never the "Key" window, destroying it produces zero shock to SwiftUI
+        self.overlayWindow?.isHidden = true
+        self.overlayWindow = nil
+        self.activePicker = nil
+        self.activeCropVC = nil
+        self.completion?(data)
+        self.completion = nil
     }
 }
 #endif
