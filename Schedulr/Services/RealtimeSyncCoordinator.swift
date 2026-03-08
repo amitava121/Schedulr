@@ -12,9 +12,7 @@ final class RealtimeSyncCoordinator {
 
     private init() {
         let firestore = Firestore.firestore()
-        let settings = firestore.settings
-        settings.isPersistenceEnabled = true
-        firestore.settings = settings
+        // Firestore persistent local cache is enabled by default on Apple platforms.
         self.db = firestore
     }
 

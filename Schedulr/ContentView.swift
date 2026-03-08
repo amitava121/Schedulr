@@ -144,6 +144,11 @@ struct ContentView: View {
 
                     hasCheckedInitialCloudRestore = false
                     prepareCloudRestorePrompt(showSuccessBanner: false)
+
+                    RealtimeSyncCoordinator.shared.startListening(context: modelContext)
+                    Task {
+                        await firebaseService.migrateLegacyDataToGranular(context: modelContext)
+                    }
                 }
                 .onChange(of: isAccountPresented) { _, isPresented in
                     if !isPresented {
@@ -172,6 +177,9 @@ struct ContentView: View {
                     }
                     hasCheckedInitialCloudRestore = false
                     prepareCloudRestorePrompt(showSuccessBanner: false)
+                    Task {
+                        await firebaseService.migrateLegacyDataToGranular(context: modelContext)
+                    }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: Notification.Name("Schedulr.AuthDidSignOut"))) { _ in
                     // Show account entry immediately after sign-out.
@@ -182,6 +190,7 @@ struct ContentView: View {
                     pendingPostAuthDestination = nil
                     hasCheckedInitialCloudRestore = false
                     viewModel.completeCloudRestoreGate()
+                    RealtimeSyncCoordinator.shared.stopListening()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .didTapScheduleNotification)) { notification in
                     handleNotificationTap(notification.userInfo)
@@ -201,6 +210,12 @@ struct ContentView: View {
                 }
                 .onAppear {
                     viewModel.setup(modelContext: modelContext)
+                    if firebaseService.isSignedIn {
+                        RealtimeSyncCoordinator.shared.startListening(context: modelContext)
+                        Task {
+                            await firebaseService.migrateLegacyDataToGranular(context: modelContext)
+                        }
+                    }
                     firebaseService.registerBackupUpdateHandler { data in
                         handleRealtimeBackupUpdate(data)
                     }
@@ -229,6 +244,7 @@ struct ContentView: View {
                 .onDisappear {
                     firebaseService.clearBackupUpdateHandler()
                     pasteboardManager.stopMonitoring()
+                    RealtimeSyncCoordinator.shared.stopListening()
                 }
                 .confirmationDialog(
                     "Quick Add from Clipboard",

@@ -869,6 +869,7 @@ final class ScheduleViewModel {
         }
         normalizeSchedules()
         NotificationManager.shared.scheduleNotification(for: schedule)
+        RealtimeSyncCoordinator.shared.pushLocalChange(schedule: schedule)
         pendingNewScheduleDate = nil
         HapticManager.notification(.success)
     }
@@ -899,6 +900,7 @@ final class ScheduleViewModel {
             refreshUndoRedoState()
         }
         normalizeSchedules()
+        RealtimeSyncCoordinator.shared.pushLocalDeletion(scheduleID: schedule.id.uuidString)
         HapticManager.notification(.warning)
     }
 
@@ -953,6 +955,7 @@ final class ScheduleViewModel {
             refreshUndoRedoState()
         }
         normalizeSchedules()
+        RealtimeSyncCoordinator.shared.pushLocalChange(schedule: schedule)
     }
 
     func updateRecurringSchedule(
@@ -989,6 +992,8 @@ final class ScheduleViewModel {
             NotificationManager.shared.scheduleNotification(for: detachedSchedule)
             NotificationManager.shared.updateNotification(for: schedule)
             normalizeSchedules()
+            RealtimeSyncCoordinator.shared.pushLocalChange(schedule: detachedSchedule)
+            RealtimeSyncCoordinator.shared.pushLocalChange(schedule: schedule)
         }
     }
 
@@ -1027,6 +1032,7 @@ final class ScheduleViewModel {
         }
 
         normalizeSchedules()
+        RealtimeSyncCoordinator.shared.pushLocalChange(schedule: schedule)
     }
 
     func resyncAllScheduleNotifications() {
