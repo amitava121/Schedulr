@@ -2,18 +2,54 @@ import SwiftUI
 import FirebaseAuth
 import FirebaseCore
 import CryptoKit
+import OSLog
 #if canImport(GoogleSignIn)
 import GoogleSignIn
 #endif
 #if os(iOS)
 import UIKit
 import AVFoundation
+import PhotosUI
+import Photos
+import UniformTypeIdentifiers
 #endif
 #if os(macOS)
 import AppKit
 #endif
 
+private enum PhotoDiagnosticsStore {
+    private static let storeKey = "profileImage.diagnostics.v1"
+
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static func snapshot() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: storeKey) as? [String: String] ?? [:]
+    }
+
+    static func set(_ key: String, _ value: String) {
+        var map = snapshot()
+        map[key] = value
+        map["diag.lastUpdatedAt"] = timestampFormatter.string(from: Date())
+        UserDefaults.standard.set(map, forKey: storeKey)
+    }
+
+    static func increment(_ key: String) {
+        let current = Int(snapshot()[key] ?? "0") ?? 0
+        set(key, String(current + 1))
+    }
+
+    static func setNow(_ key: String) {
+        set(key, timestampFormatter.string(from: Date()))
+    }
+}
+
 struct FirebaseAccountView: View {
+    private static let lockedPickerInstantDismissCountKey = "profileImage.lockedPicker.instantDismiss.count"
+
     private enum AuthMode: String, CaseIterable, Identifiable {
         case signIn
         case signUp
@@ -42,6 +78,14 @@ struct FirebaseAccountView: View {
     @State private var authMode: AuthMode = .signIn
     @State private var statusClearTask: Task<Void, Never>?
     @State private var transientStatusMessage: String?
+    @State private var manualRestoreStatusMessage: String?
+    @State private var syncDiagnosticsStatusMessage: String?
+    @State private var photoDiagnosticsStatusMessage: String?
+    @State private var profileSaveAttemptCount = 0
+    @State private var lastProfileSaveAt: Date?
+    @State private var lastProfileSaveNameLength = 0
+    @State private var lastProfileSavePhotoBytes = 0
+    @State private var lastProfileSaveErrorMessage: String?
     @State private var showSignOutConfirmation = false
     @State private var showProfileEditor = false
     @State private var profileEditorNameDraft = ""
@@ -54,12 +98,17 @@ struct FirebaseAccountView: View {
         case .idle:
             return "Idle"
         case .syncing:
-            return "Syncing"
+            return "In Progress"
         case .conflict:
             return "Conflicts"
         case .error:
             return "Error"
         }
+    }
+
+    private var syncProgressPercentText: String {
+        let raw = Int((viewModel.syncCoordinator.syncProgress * 100).rounded())
+        return "\(min(max(raw, 0), 100))%"
     }
 
     private var syncStatusColor: Color {
@@ -154,23 +203,44 @@ struct FirebaseAccountView: View {
                     let trimmedName = updatedName.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmedName.isEmpty else { return }
 
-                    let photoData = updatedPhotoData
-                    // Reflect changes instantly in the account UI.
-                    firebaseService.profileDisplayName = updatedName
-                    persistProfileDisplayName(updatedName)
+                    let photoData = updatedPhotoData.map { compressedProfileImageData(from: $0) }
+                    profileSaveAttemptCount += 1
+                    lastProfileSaveAt = Date()
+                    lastProfileSaveNameLength = trimmedName.count
+                    lastProfileSavePhotoBytes = photoData?.count ?? 0
+                    lastProfileSaveErrorMessage = nil
+                    PhotoDiagnosticsStore.increment("diag.profileSaveAttemptCount")
+                    PhotoDiagnosticsStore.setNow("diag.lastProfileSaveAttemptAt")
+                    PhotoDiagnosticsStore.set("diag.lastProfileSaveNameLength", String(trimmedName.count))
+                    PhotoDiagnosticsStore.set("diag.lastProfileSavePhotoBytes", String(photoData?.count ?? 0))
+                    PhotoDiagnosticsStore.set("diag.lastProfileSaveFlow", "account-profile-editor")
+
+                    firebaseService.profileDisplayName = trimmedName
+                    persistProfileDisplayName(trimmedName)
                     if let photoData {
                         customProfileImageData = photoData
                         firebaseService.profilePhotoData = photoData
                         persistProfileImage(photoData)
                     }
 
-                    await firebaseService.updateProfileMetadata(displayName: updatedName, photoData: photoData)
-                    await firebaseService.refreshProfileMetadata()
+                    await firebaseService.updateProfileMetadata(displayName: trimmedName, photoData: photoData)
                     await MainActor.run {
+                        let saveError = firebaseService.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let saveError, !saveError.isEmpty {
+                            lastProfileSaveErrorMessage = saveError
+                            PhotoDiagnosticsStore.set("diag.lastProfileSaveError", saveError)
+                            PhotoDiagnosticsStore.setNow("diag.lastProfileSaveFailureAt")
+                        } else {
+                            lastProfileSaveErrorMessage = nil
+                            PhotoDiagnosticsStore.set("diag.lastProfileSaveError", "<nil>")
+                            PhotoDiagnosticsStore.setNow("diag.lastProfileSaveSuccessAt")
+                        }
+
                         if let latestPhoto = firebaseService.profilePhotoData {
                             customProfileImageData = latestPhoto
                             persistProfileImage(latestPhoto)
                         }
+                        showProfileEditor = false
                     }
                 }
                 .presentationDetents([.height(460)])
@@ -600,13 +670,23 @@ struct FirebaseAccountView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(AppTheme.accent)
-                    .disabled(viewModel.isRestoreInProgress)
+                    .disabled(viewModel.isRestoreInProgress || viewModel.isSyncNowInProgress)
 
                     Spacer()
 
-                    Text(syncStatusText)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(syncStatusColor)
+                    if viewModel.isSyncNowInProgress {
+                        HStack(spacing: 8) {
+                            ProgressView(value: viewModel.syncCoordinator.syncProgress)
+                                .frame(width: 88)
+                            Text(syncProgressPercentText)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(AppTheme.accent)
+                        }
+                    } else {
+                        Text(syncStatusText)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(syncStatusColor)
+                    }
                 }
 
                 if let lastSyncedAt = firebaseService.lastSyncedAt {
@@ -614,6 +694,66 @@ struct FirebaseAccountView: View {
                         Color.clear
                             .frame(width: cloudRowLabelInset, height: 1)
                         Text("Last synced: \(lastSyncedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                if let syncActivity = viewModel.syncCoordinator.syncLastActivityMessage,
+                   !syncActivity.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Color.clear
+                            .frame(width: cloudRowLabelInset, height: 1)
+                        Text(syncActivity)
+                            .font(.caption)
+                            .foregroundStyle(viewModel.syncCoordinator.syncState == .error ? .red : .secondary)
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                HStack {
+                    Button {
+                        copySyncDiagnosticsToClipboard()
+                    } label: {
+                        Label("Copy Sync Diagnostics", systemImage: "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+
+                    Spacer()
+                }
+
+                HStack {
+                    Button {
+                        copyPhotoDiagnosticsToClipboard()
+                    } label: {
+                        Label("Copy Photo Diagnostics", systemImage: "photo.on.rectangle.angled")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+
+                    Spacer()
+                }
+
+                if let syncDiagnosticsStatusMessage, !syncDiagnosticsStatusMessage.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Color.clear
+                            .frame(width: cloudRowLabelInset, height: 1)
+                        Text(syncDiagnosticsStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                if let photoDiagnosticsStatusMessage, !photoDiagnosticsStatusMessage.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Color.clear
+                            .frame(width: cloudRowLabelInset, height: 1)
+                        Text(photoDiagnosticsStatusMessage)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
@@ -642,15 +782,44 @@ struct FirebaseAccountView: View {
                                 viewModel.completeCloudRestoreGate()
                             }
 
-                            if let backup = await firebaseService.downloadBackup(), !backup.data.isEmpty {
+                            let downloadResult = await firebaseService.downloadBackupWithResult()
+                            switch downloadResult {
+                            case .success(let backup) where !backup.data.isEmpty:
                                 if let version = backup.globalSyncVersion {
                                     viewModel.seedGlobalSyncVersion(version)
                                 }
-                                viewModel.importBackupData(
+                                let restoreResult = viewModel.importBackupData(
                                     backup.data,
                                     includeSchedules: true,
                                     includeSettings: true
                                 )
+                                manualRestoreStatusMessage = restoreResult.userMessage
+
+                            case .missingBackup, .success:
+                                manualRestoreStatusMessage = "No cloud backup found."
+
+                            case .notConfigured, .authFailed:
+                                manualRestoreStatusMessage = "Not signed in."
+
+                            case .networkError(let msg):
+                                manualRestoreStatusMessage = "Download failed: \(msg)"
+
+                            case .decodeFailed(let msg):
+                                manualRestoreStatusMessage = "Backup corrupt: \(msg)"
+
+                            case .cacheFallback(let backup) where !backup.data.isEmpty:
+                                if let version = backup.globalSyncVersion {
+                                    viewModel.seedGlobalSyncVersion(version)
+                                }
+                                let restoreResult = viewModel.importBackupData(
+                                    backup.data,
+                                    includeSchedules: true,
+                                    includeSettings: true
+                                )
+                                manualRestoreStatusMessage = restoreResult.userMessage + " (cached)"
+
+                            case .cacheFallback:
+                                manualRestoreStatusMessage = "No cached backup available."
                             }
                         }
                     } label: {
@@ -686,6 +855,23 @@ struct FirebaseAccountView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
+                    }
+                }
+
+                if let msg = manualRestoreStatusMessage {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Color.clear
+                            .frame(width: cloudRowLabelInset, height: 1)
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .onAppear {
+                        Task {
+                            try? await Task.sleep(for: .seconds(4))
+                            manualRestoreStatusMessage = nil
+                        }
                     }
                 }
             }
@@ -754,6 +940,190 @@ struct FirebaseAccountView: View {
             .map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
             .joined(separator: " ")
     }
+
+    private func copySyncDiagnosticsToClipboard() {
+        let diagnostics = buildSyncDiagnosticsPayload()
+
+#if os(iOS)
+        UIPasteboard.general.string = diagnostics
+#elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics, forType: .string)
+#endif
+
+        syncDiagnosticsStatusMessage = "Sync diagnostics copied to clipboard."
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            syncDiagnosticsStatusMessage = nil
+        }
+    }
+
+    private func buildSyncDiagnosticsPayload() -> String {
+        let report = viewModel.syncCoordinator.lastSyncReport
+        let state = String(describing: viewModel.syncCoordinator.syncState)
+        let progress = Int((viewModel.syncCoordinator.syncProgress * 100).rounded())
+        let activity = viewModel.syncCoordinator.syncLastActivityMessage ?? "<nil>"
+        let firebaseError = firebaseService.lastErrorMessage ?? "<nil>"
+
+        var lines: [String] = []
+        lines.append("Timestamp: \(Date().formatted(date: .abbreviated, time: .standard))")
+        lines.append("SyncState: \(state)")
+        lines.append("SyncProgress: \(progress)%")
+        lines.append("SyncLastActivityMessage: \(activity)")
+        lines.append("FirebaseLastErrorMessage: \(firebaseError)")
+
+        if let report {
+            lines.append("Report.succeeded: \(report.succeeded)")
+            lines.append("Report.userMessage: \(report.userMessage)")
+            lines.append("Report.deltaPushSucceeded: \(report.deltaPushSucceeded)")
+            lines.append("Report.deltaPullSucceeded: \(report.deltaPullSucceeded)")
+            lines.append("Report.backupUploadSucceeded: \(report.backupUploadSucceeded)")
+            lines.append("Report.deltaPushCount: \(report.deltaPushCount)")
+            lines.append("Report.deltaPullCount: \(report.deltaPullCount)")
+            lines.append("Report.conflictsRemaining: \(report.conflictsRemaining)")
+            lines.append("Report.failure: \(String(describing: report.failure))")
+            if !report.warnings.isEmpty {
+                lines.append("Report.warnings: \(report.warnings.joined(separator: " | "))")
+            }
+        } else {
+            lines.append("Report: <nil>")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func copyPhotoDiagnosticsToClipboard() {
+        let diagnostics = buildPhotoDiagnosticsPayload()
+
+#if os(iOS)
+        UIPasteboard.general.string = diagnostics
+#elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics, forType: .string)
+#endif
+
+        photoDiagnosticsStatusMessage = "Photo diagnostics copied to clipboard."
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            photoDiagnosticsStatusMessage = nil
+        }
+    }
+
+    private func buildPhotoDiagnosticsPayload() -> String {
+        let diag = PhotoDiagnosticsStore.snapshot()
+        let email = firebaseService.signedInEmail ?? "<nil>"
+        let firebaseDisplayName = firebaseService.profileDisplayName ?? "<nil>"
+        let resolvedDisplayName = userDisplayName
+        let storedDisplayName = storedProfileDisplayName() ?? "<nil>"
+        let customImageBytes = customProfileImageData?.count ?? 0
+        let firebaseImageBytes = firebaseService.profilePhotoData?.count ?? 0
+        let storedImageBytes: Int = {
+            guard let key = profileImageStorageKey() else { return 0 }
+            return UserDefaults.standard.data(forKey: key)?.count ?? 0
+        }()
+        let lockedDismissCount = UserDefaults.standard.integer(forKey: Self.lockedPickerInstantDismissCountKey)
+        let firebaseError = firebaseService.lastErrorMessage ?? "<nil>"
+        let saveError = lastProfileSaveErrorMessage ?? "<nil>"
+        let saveAt = lastProfileSaveAt?.formatted(date: .abbreviated, time: .standard) ?? "<nil>"
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "<nil>"
+        let appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "<nil>"
+        let firestoreDatabaseID = (Bundle.main.object(forInfoDictionaryKey: "FIRESTORE_DATABASE_ID") as? String) ?? "(default)"
+        let diagLastPickerFlow = diag["diag.lastPickerFlow"] ?? "<nil>"
+        let diagLastPickerPath = diag["diag.lastPickerPath"] ?? "<nil>"
+        let diagLastPickerRequestReason = diag["diag.lastPickerRequestReason"] ?? "<nil>"
+        let diagLastPermissionReadWrite = diag["diag.lastPermission.readWrite"] ?? "<nil>"
+        let diagLastPHPickerResult = diag["diag.lastPHPickerResult"] ?? "<nil>"
+        let diagLastFileImporterResult = diag["diag.lastFileImporterResult"] ?? "<nil>"
+        let diagLastCropResult = diag["diag.lastCropResult"] ?? "<nil>"
+
+        var lines: [String] = []
+        lines.append("Timestamp: \(Date().formatted(date: .abbreviated, time: .standard))")
+        lines.append("AppVersion: \(appVersion) (\(appBuild))")
+        lines.append("FirestoreDatabaseID: \(firestoreDatabaseID)")
+        lines.append("SignedInEmail: \(email)")
+        lines.append("ResolvedDisplayName: \(resolvedDisplayName)")
+        lines.append("FirebaseProfileDisplayName: \(firebaseDisplayName)")
+        lines.append("StoredProfileDisplayName: \(storedDisplayName)")
+        lines.append("CustomProfileImageBytes: \(customImageBytes)")
+        lines.append("FirebaseProfileImageBytes: \(firebaseImageBytes)")
+        lines.append("StoredProfileImageBytes: \(storedImageBytes)")
+        lines.append("LockedPickerInstantDismissCount: \(lockedDismissCount)")
+        lines.append("ProfileSaveAttemptCount: \(profileSaveAttemptCount)")
+        lines.append("LastProfileSaveAt: \(saveAt)")
+        lines.append("LastProfileSaveNameLength: \(lastProfileSaveNameLength)")
+        lines.append("LastProfileSavePhotoBytes: \(lastProfileSavePhotoBytes)")
+        lines.append("LastProfileSaveError: \(saveError)")
+        lines.append("FirebaseLastErrorMessage: \(firebaseError)")
+        lines.append("Diag.lastPickerFlow: \(diagLastPickerFlow)")
+        lines.append("Diag.lastPickerPath: \(diagLastPickerPath)")
+        lines.append("Diag.lastPickerRequestReason: \(diagLastPickerRequestReason)")
+        lines.append("Diag.lastPermission.readWrite: \(diagLastPermissionReadWrite)")
+        lines.append("Diag.lastPHPickerResult: \(diagLastPHPickerResult)")
+        lines.append("Diag.lastPHPickerPresentError: \(diag["diag.lastPHPickerPresentError"] ?? "<nil>")")
+        lines.append("Diag.lastFileImporterResult: \(diagLastFileImporterResult)")
+        lines.append("Diag.lastCropResult: \(diagLastCropResult)")
+        lines.append("Diag.phpickerPresentCount: \(diag["diag.phpickerPresentCount"] ?? "0")")
+        lines.append("Diag.phpickerInstantDismissCount: \(diag["diag.phpickerInstantDismissCount"] ?? "0")")
+        lines.append("Diag.phpickerSilentDismissCount: \(diag["diag.phpickerSilentDismissCount"] ?? "0")")
+        lines.append("Diag.phpickerSelectionCount: \(diag["diag.phpickerSelectionCount"] ?? "0")")
+        lines.append("Diag.fileImporterSelectionCount: \(diag["diag.fileImporterSelectionCount"] ?? "0")")
+        lines.append("Diag.fileImporterFailureCount: \(diag["diag.fileImporterFailureCount"] ?? "0")")
+        lines.append("Diag.cropUseCount: \(diag["diag.cropUseCount"] ?? "0")")
+        lines.append("Diag.cropCancelCount: \(diag["diag.cropCancelCount"] ?? "0")")
+        lines.append("Diag.lastUpdatedAt: \(diag["diag.lastUpdatedAt"] ?? "<nil>")")
+        lines.append("Diag.lastProfileSaveAttemptAt: \(diag["diag.lastProfileSaveAttemptAt"] ?? "<nil>")")
+        lines.append("Diag.lastProfileSaveSuccessAt: \(diag["diag.lastProfileSaveSuccessAt"] ?? "<nil>")")
+        lines.append("Diag.lastProfileSaveFailureAt: \(diag["diag.lastProfileSaveFailureAt"] ?? "<nil>")")
+        lines.append("Diag.lastProfileSaveError: \(diag["diag.lastProfileSaveError"] ?? "<nil>")")
+
+#if os(iOS)
+        lines.append("DeviceModel: \(UIDevice.current.model)")
+        lines.append("SystemVersion: iOS \(UIDevice.current.systemVersion)")
+        lines.append("PhotoAuth(readWrite): \(photoAuthorizationDescription(PHPhotoLibrary.authorizationStatus(for: .readWrite)))")
+        lines.append("PhotoAuth(addOnly): \(photoAuthorizationDescription(PHPhotoLibrary.authorizationStatus(for: .addOnly)))")
+        lines.append("CameraAuth(video): \(cameraAuthorizationDescription(AVCaptureDevice.authorizationStatus(for: .video)))")
+#else
+        lines.append("PhotoAuth: not-applicable-on-this-platform")
+        lines.append("CameraAuth: not-applicable-on-this-platform")
+#endif
+
+        lines.append("ExpectedProfileDocPaths: users/{uid} and users/{uid}/profile/current")
+        return lines.joined(separator: "\n")
+    }
+
+#if os(iOS)
+    private func photoAuthorizationDescription(_ status: PHAuthorizationStatus) -> String {
+        switch status {
+        case .authorized:
+            return "authorized"
+        case .limited:
+            return "limited"
+        case .denied:
+            return "denied"
+        case .restricted:
+            return "restricted"
+        case .notDetermined:
+            return "notDetermined"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private func cameraAuthorizationDescription(_ status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .authorized:
+            return "authorized"
+        case .denied:
+            return "denied"
+        case .restricted:
+            return "restricted"
+        case .notDetermined:
+            return "notDetermined"
+        @unknown default:
+            return "unknown"
+        }
+    }
+#endif
 
     @ViewBuilder
     private var profileAvatar: some View {
@@ -1005,45 +1375,201 @@ struct FirebaseAccountView: View {
 }
 
 #if os(iOS)
-private final class RootImagePickerPresenter: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
-    var onPicked: ((UIImage?) -> Void)?
+final class PhotoPickerManager: NSObject, PHPickerViewControllerDelegate {
+    static let shared = PhotoPickerManager()
 
-    func present(sourceType: UIImagePickerController.SourceType) {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
-        else { return }
+    private var completion: ((UIImage?) -> Void)?
 
-        let picker = UIImagePickerController()
-        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(sourceType) ? sourceType : .photoLibrary
-        picker.allowsEditing = false
+    func present(completion: @escaping (UIImage?) -> Void) {
+        self.completion = completion
+
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+
+        let picker = PHPickerViewController(configuration: config)
         picker.delegate = self
-        picker.modalPresentationStyle = .fullScreen
 
-        var topVC = root
-        while let presented = topVC.presentedViewController {
-            topVC = presented
-        }
-        topVC.present(picker, animated: true)
-    }
-
-    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-        picker.dismiss(animated: true) { [weak self] in
-            self?.onPicked?(nil)
+        DispatchQueue.main.async {
+            guard let topVC = self.topViewController() else {
+                completion(nil)
+                self.completion = nil
+                return
+            }
+            topVC.present(picker, animated: true)
         }
     }
 
-    func imagePickerController(
-        _ picker: UIImagePickerController,
-        didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-    ) {
-        let image = (info[.originalImage] as? UIImage)
-        picker.dismiss(animated: true) { [weak self] in
-            self?.onPicked?(image)
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        guard let provider = results.first?.itemProvider else {
+            picker.dismiss(animated: true) { self.cleanupAndComplete(nil) }
+            return
+        }
+
+        picker.dismiss(animated: true) {
+            self.extractImage(from: provider)
+        }
+    }
+
+    private func extractImage(from provider: NSItemProvider) {
+        if provider.canLoadObject(ofClass: UIImage.self) {
+            provider.loadObject(ofClass: UIImage.self) { object, _ in
+                if let image = object as? UIImage {
+                    self.cleanupAndComplete(image)
+                } else {
+                    self.extractDataFallback(from: provider)
+                }
+            }
+            return
+        }
+
+        extractDataFallback(from: provider)
+    }
+
+    private func extractDataFallback(from provider: NSItemProvider) {
+        let identifier = UTType.image.identifier
+        guard provider.hasItemConformingToTypeIdentifier(identifier) else {
+            cleanupAndComplete(nil)
+            return
+        }
+
+        provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, _ in
+            if let data, let image = UIImage(data: data) {
+                self.cleanupAndComplete(image)
+                return
+            }
+
+            provider.loadFileRepresentation(forTypeIdentifier: identifier) { url, _ in
+                guard let url,
+                      let data = try? Data(contentsOf: url),
+                      let image = UIImage(data: data)
+                else {
+                    self.cleanupAndComplete(nil)
+                    return
+                }
+                self.cleanupAndComplete(image)
+            }
+        }
+    }
+
+    private func cleanupAndComplete(_ image: UIImage?) {
+        DispatchQueue.main.async {
+            self.completion?(image)
+            self.completion = nil
+        }
+    }
+
+    private func topViewController() -> UIViewController? {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+              let root = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else {
+            return nil
+        }
+
+        var top = root
+        while let presented = top.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+}
+
+final class UniversalCropManager: NSObject {
+    static let shared = UniversalCropManager()
+
+    func presentCrop(for image: UIImage, completion: @escaping (Data?) -> Void) {
+        DispatchQueue.main.async {
+            let cropView = ProfileImageCropView(image: image) { croppedData in
+                self.dismissAndComplete(data: croppedData, completion: completion)
+            } onCancel: {
+                self.dismissAndComplete(data: nil, completion: completion)
+            }
+
+            let hostingController = UIHostingController(rootView: cropView)
+            hostingController.modalPresentationStyle = .fullScreen
+            hostingController.view.backgroundColor = .black
+
+            guard let topVC = self.topViewController() else {
+                completion(nil)
+                return
+            }
+            topVC.present(hostingController, animated: true)
+        }
+    }
+
+    private func dismissAndComplete(data: Data?, completion: @escaping (Data?) -> Void) {
+        DispatchQueue.main.async {
+            guard let topVC = self.topViewController() else {
+                completion(data)
+                return
+            }
+
+            topVC.dismiss(animated: true) {
+                completion(data)
+            }
+        }
+    }
+
+    private func topViewController() -> UIViewController? {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+              let root = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else {
+            return nil
+        }
+
+        var top = root
+        while let presented = top.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+}
+
+private struct CameraImagePicker: UIViewControllerRepresentable {
+    let onPicked: (UIImage?) -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPicked: onPicked)
+    }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onPicked: (UIImage?) -> Void
+
+        init(onPicked: @escaping (UIImage?) -> Void) {
+            self.onPicked = onPicked
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            let image = info[.originalImage] as? UIImage
+            onPicked(image)
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onPicked(nil)
         }
     }
 }
 
 private struct AccountProfileEditorSheet: View {
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "profile-image"
+    )
+
     @Binding var name: String
     @Binding var imageData: Data?
     let email: String?
@@ -1055,17 +1581,16 @@ private struct AccountProfileEditorSheet: View {
     @State private var showCameraPermissionAlert = false
     @State private var cameraPermissionMessage = ""
     @State private var isSaving = false
-    @State private var pendingCropImage: UIImage?
-    @State private var showCropView = false
-    @State private var pickerPresenter = RootImagePickerPresenter()
+    @State private var showCameraPicker = false
 
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 18) {
+        ZStack {
+            NavigationStack {
+                VStack(spacing: 18) {
                 Button {
                     showImageSourceDialog = true
                 } label: {
@@ -1123,11 +1648,11 @@ private struct AccountProfileEditorSheet: View {
                 }
 
                 Spacer()
-            }
-            .padding(16)
-            .navigationTitle("Edit Profile")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
+                }
+                .padding(16)
+                .navigationTitle("Edit Profile")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         dismiss()
@@ -1137,80 +1662,175 @@ private struct AccountProfileEditorSheet: View {
                     Button("Save") {
                         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else { return }
-                        Task {
+                        Task { @MainActor in
                             isSaving = true
                             await onSave(trimmed, imageData)
                             isSaving = false
-                            dismiss()
                         }
                     }
                     .disabled(!canSave || isSaving)
                 }
-            }
-            .confirmationDialog("Profile Image", isPresented: $showImageSourceDialog, titleVisibility: .visible) {
+                }
+                .confirmationDialog("Profile Image", isPresented: $showImageSourceDialog, titleVisibility: .visible) {
                 Button("Select from Photos") {
-                    openPicker(source: .photoLibrary)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        PhotoDiagnosticsStore.set("diag.lastPickerFlow", "requested")
+                        PhotoDiagnosticsStore.set("diag.lastPickerPath", "isolated-window")
+                        PhotoDiagnosticsStore.setNow("diag.lastPickerRequestedAt")
+                        PhotoDiagnosticsStore.set("diag.lastPickerRequestReason", "isolated-phpicker-window")
+                        PhotoDiagnosticsStore.increment("diag.phpickerPresentCount")
+                        PhotoDiagnosticsStore.set("diag.lastPHPickerResult", "pending-native-photospicker")
+                        PhotoDiagnosticsStore.setNow("diag.lastPHPickerPresentedAt")
+
+                        PhotoPickerManager.shared.present { selectedImage in
+                            DispatchQueue.main.async {
+                                guard let selectedImage else {
+                                    PhotoDiagnosticsStore.set("diag.lastPHPickerResult", "cancel-or-no-selection")
+                                    PhotoDiagnosticsStore.setNow("diag.lastPHPickerResultAt")
+                                    return
+                                }
+
+                                PhotoDiagnosticsStore.set("diag.lastPickerFlow", "presented")
+                                PhotoDiagnosticsStore.set("diag.lastPickerPath", "isolated-window")
+                                PhotoDiagnosticsStore.set("diag.lastPHPickerResult", "selected")
+                                PhotoDiagnosticsStore.increment("diag.phpickerSelectionCount")
+                                PhotoDiagnosticsStore.setNow("diag.lastPHPickerResultAt")
+
+                                UniversalCropManager.shared.presentCrop(for: selectedImage) { croppedData in
+                                    guard let croppedData else {
+                                        PhotoDiagnosticsStore.set("diag.lastCropResult", "cancel")
+                                        PhotoDiagnosticsStore.increment("diag.cropCancelCount")
+                                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
+                                        return
+                                    }
+                                    DispatchQueue.main.async {
+                                        PhotoDiagnosticsStore.set("diag.lastCropResult", "use")
+                                        PhotoDiagnosticsStore.set("diag.lastCropBytes", String(croppedData.count))
+                                        PhotoDiagnosticsStore.increment("diag.cropUseCount")
+                                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
+                                        withAnimation {
+                                            imageData = croppedData
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 if UIImagePickerController.isSourceTypeAvailable(.camera) {
                     Button("Open Camera") {
+                        PhotoDiagnosticsStore.set("diag.lastPickerFlow", "requested")
+                        PhotoDiagnosticsStore.set("diag.lastPickerPath", "camera")
+                        PhotoDiagnosticsStore.setNow("diag.lastPickerRequestedAt")
                         requestAndOpenCameraIfAllowed()
                     }
                 }
                 Button("Select from Files") {
+                    PhotoDiagnosticsStore.set("diag.lastPickerFlow", "requested")
+                    PhotoDiagnosticsStore.set("diag.lastPickerPath", "files")
+                    PhotoDiagnosticsStore.setNow("diag.lastPickerRequestedAt")
                     showFileImporter = true
                 }
                 Button("Cancel", role: .cancel) {}
-            }
-            .alert("Camera Access", isPresented: $showCameraPermissionAlert) {
+                }
+                .alert("Camera Access", isPresented: $showCameraPermissionAlert) {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(cameraPermissionMessage)
             }
-            .fullScreenCover(isPresented: $showCropView) {
-                if let cropImage = pendingCropImage {
-                    ProfileImageCropView(image: cropImage) { croppedData in
-                        imageData = croppedData
-                        showCropView = false
-                        pendingCropImage = nil
-                    } onCancel: {
-                        showCropView = false
-                        pendingCropImage = nil
+                .fullScreenCover(isPresented: $showCameraPicker) {
+                CameraImagePicker { image in
+                    showCameraPicker = false
+
+                    if let image {
+                        PhotoDiagnosticsStore.set("diag.lastCameraPickerResult", "selected")
+                        PhotoDiagnosticsStore.setNow("diag.lastCameraPickerAt")
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            UniversalCropManager.shared.presentCrop(for: image) { croppedData in
+                                guard let croppedData else {
+                                    PhotoDiagnosticsStore.set("diag.lastCropResult", "cancel")
+                                    PhotoDiagnosticsStore.increment("diag.cropCancelCount")
+                                    PhotoDiagnosticsStore.setNow("diag.lastCropAt")
+                                    return
+                                }
+                                DispatchQueue.main.async {
+                                    PhotoDiagnosticsStore.set("diag.lastCropResult", "use")
+                                    PhotoDiagnosticsStore.set("diag.lastCropBytes", String(croppedData.count))
+                                    PhotoDiagnosticsStore.increment("diag.cropUseCount")
+                                    PhotoDiagnosticsStore.setNow("diag.lastCropAt")
+                                    withAnimation {
+                                        imageData = croppedData
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        PhotoDiagnosticsStore.set("diag.lastCameraPickerResult", "cancel")
+                        PhotoDiagnosticsStore.setNow("diag.lastCameraPickerAt")
                     }
                 }
+                .ignoresSafeArea()
+                }
+                .onAppear {
+                PhotoDiagnosticsStore.setNow("diag.profileEditorOpenedAt")
+                PhotoDiagnosticsStore.set("diag.profileEditorHasExistingImage", String(imageData != nil))
             }
-            .fileImporter(
+                .fileImporter(
                 isPresented: $showFileImporter,
                 allowedContentTypes: [.image],
                 allowsMultipleSelection: false
             ) { result in
                 guard case .success(let urls) = result,
                       let url = urls.first
-                else { return }
+                else {
+                    PhotoDiagnosticsStore.set("diag.lastFileImporterResult", "cancel-or-failure")
+                    PhotoDiagnosticsStore.increment("diag.fileImporterFailureCount")
+                    PhotoDiagnosticsStore.setNow("diag.lastFileImporterAt")
+                    return
+                }
 
                 let started = url.startAccessingSecurityScopedResource()
                 defer { if started { url.stopAccessingSecurityScopedResource() } }
 
                 guard let data = try? Data(contentsOf: url),
                       let uiImage = UIImage(data: data)
-                else { return }
-                pendingCropImage = uiImage
-                showCropView = true
-            }
-        }
-    }
+                else {
+                    PhotoDiagnosticsStore.set("diag.lastFileImporterResult", "decode-failed")
+                    PhotoDiagnosticsStore.increment("diag.fileImporterFailureCount")
+                    PhotoDiagnosticsStore.setNow("diag.lastFileImporterAt")
+                    return
+                }
+                PhotoDiagnosticsStore.set("diag.lastFileImporterResult", "selected")
+                PhotoDiagnosticsStore.set("diag.lastFileImporterBytes", String(data.count))
+                PhotoDiagnosticsStore.increment("diag.fileImporterSelectionCount")
+                PhotoDiagnosticsStore.setNow("diag.lastFileImporterAt")
 
-    private func openPicker(source: UIImagePickerController.SourceType) {
-        pickerPresenter.onPicked = { image in
-            if let image {
-                pendingCropImage = image
-                showCropView = true
+                UniversalCropManager.shared.presentCrop(for: uiImage) { croppedData in
+                    guard let croppedData else {
+                        PhotoDiagnosticsStore.set("diag.lastCropResult", "cancel")
+                        PhotoDiagnosticsStore.increment("diag.cropCancelCount")
+                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        PhotoDiagnosticsStore.set("diag.lastCropResult", "use")
+                        PhotoDiagnosticsStore.set("diag.lastCropBytes", String(croppedData.count))
+                        PhotoDiagnosticsStore.increment("diag.cropUseCount")
+                        PhotoDiagnosticsStore.setNow("diag.lastCropAt")
+                        withAnimation {
+                            imageData = croppedData
+                        }
+                    }
+                }
+                }
             }
         }
-        pickerPresenter.present(sourceType: source)
     }
 
     private func requestAndOpenCameraIfAllowed() {
         guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "camera-unavailable")
             cameraPermissionMessage = "Camera is not available on this device."
             showCameraPermissionAlert = true
             return
@@ -1218,29 +1838,46 @@ private struct AccountProfileEditorSheet: View {
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            openPicker(source: .camera)
+            PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "authorized")
+            PhotoDiagnosticsStore.setNow("diag.lastCameraPermissionCheckedAt")
+            showCameraPicker = true
         case .notDetermined:
+            PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "notDetermined")
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
                     if granted {
-                        self.openPicker(source: .camera)
+                        PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "authorized-after-prompt")
+                        PhotoDiagnosticsStore.setNow("diag.lastCameraPermissionCheckedAt")
+                        self.showCameraPicker = true
                     } else {
+                        PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "denied-after-prompt")
+                        PhotoDiagnosticsStore.setNow("diag.lastCameraPermissionCheckedAt")
                         self.cameraPermissionMessage = "Camera access is required to take a profile photo."
                         self.showCameraPermissionAlert = true
                     }
                 }
             }
         case .denied, .restricted:
+            PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "denied-or-restricted")
+            PhotoDiagnosticsStore.setNow("diag.lastCameraPermissionCheckedAt")
             cameraPermissionMessage = "Please allow camera access in iOS Settings to use this option."
             showCameraPermissionAlert = true
         @unknown default:
+            PhotoDiagnosticsStore.set("diag.lastCameraPermissionResult", "unknown")
+            PhotoDiagnosticsStore.setNow("diag.lastCameraPermissionCheckedAt")
             cameraPermissionMessage = "Camera permission status is unavailable."
             showCameraPermissionAlert = true
         }
     }
+
 }
 
 private struct ProfileImageCropView: View {
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "profile-image"
+    )
+
     let image: UIImage
     let onUse: (Data) -> Void
     let onCancel: () -> Void
@@ -1326,7 +1963,11 @@ private struct ProfileImageCropView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Choose") {
+                        logger.debug(
+                            "Crop choose tapped; container=\(self.containerSize.debugDescription, privacy: .public) scale=\(self.scale, privacy: .public) offset=(\(self.offset.width, privacy: .public), \(self.offset.height, privacy: .public))"
+                        )
                         let data = renderCroppedImage()
+                        logger.debug("Crop render finished; output bytes=\(data.count, privacy: .public)")
                         onUse(data)
                     }
                     .foregroundStyle(.white)
@@ -1339,26 +1980,30 @@ private struct ProfileImageCropView: View {
         let outputSize: CGFloat = 320
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: outputSize, height: outputSize))
 
+        let safeContainerWidth = max(containerSize.width, 1)
+        let safeContainerHeight = max(containerSize.height, 1)
+        let safeCropDiameter = max(cropDiameter, 1)
+        let containerAspect = safeContainerWidth / safeContainerHeight
+
         let result = renderer.image { _ in
             UIBezierPath(ovalIn: CGRect(origin: .zero, size: CGSize(width: outputSize, height: outputSize))).addClip()
 
             let imageAspect = image.size.width / image.size.height
-            let containerAspect = containerSize.width / containerSize.height
 
             var baseW: CGFloat
             var baseH: CGFloat
             if imageAspect > containerAspect {
-                baseH = containerSize.height
+                baseH = safeContainerHeight
                 baseW = baseH * imageAspect
             } else {
-                baseW = containerSize.width
+                baseW = safeContainerWidth
                 baseH = baseW / imageAspect
             }
 
             let displayW = baseW * scale
             let displayH = baseH * scale
 
-            let factor = outputSize / cropDiameter
+            let factor = outputSize / safeCropDiameter
             let drawW = displayW * factor
             let drawH = displayH * factor
             let drawX = (outputSize - drawW) / 2 + offset.width * factor

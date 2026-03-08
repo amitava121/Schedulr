@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftData
 import SwiftUI
 #if os(iOS)
@@ -40,6 +41,10 @@ struct HeatmapDaySummary {
 
 @Observable
 final class ScheduleViewModel {
+    private static let syncLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "sync"
+    )
     private static let recurringCompletionStorageKey = "scheduleRecurringCompletion.v1"
     private static let widgetAppGroupID = "group.com.bittu.Schedulr"
     private static let widgetSnapshotKey = "widget.scheduleSnapshot.v1"
@@ -519,20 +524,24 @@ final class ScheduleViewModel {
         return try? encoder.encode(payload)
     }
 
+    @discardableResult
     func importBackupData(
         _ data: Data,
         includeSchedules: Bool = true,
         includeSettings: Bool = true
-    ) {
-        guard let modelContext else { return }
+    ) -> RestoreResult {
+        guard let modelContext else { return RestoreResult(failure: .noModelContext) }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let payload = try? decoder.decode(BackupPayload.self, from: data) else { return }
+        guard let payload = try? decoder.decode(BackupPayload.self, from: data) else {
+            return RestoreResult(failure: .decodeFailed)
+        }
 
         suppressNextAutoCloudUpload = true
 
         isRestoreInProgress = true
         restoreProgress = 0
+        var result = RestoreResult()
         defer {
             isRestoreInProgress = false
             restoreProgress = 1
@@ -553,12 +562,13 @@ final class ScheduleViewModel {
 
         if includeSettings, let backupSettings = payload.appSettings {
             applyBackupAppSettings(backupSettings)
+            result.settingsApplied = true
         }
         advanceProgress()
 
         guard includeSchedules else {
             advanceProgress()
-            return
+            return result
         }
 
         if let backupCalendarNames = payload.calendarNames {
@@ -580,14 +590,16 @@ final class ScheduleViewModel {
             if let existing = existingByID[backupItem.id] {
                 switch SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: existing, remoteSchedule: remoteSchedule) {
                 case .keepLocal:
-                    break
+                    result.skippedCount += 1
                 case .keepRemote:
                     apply(backupItem, to: existing)
+                    result.mergedCount += 1
                 case .merge(let merged):
                     applyScheduleValues(from: merged, to: existing)
                     existing.updatedAt = merged.updatedAt
                     existing.lastModifiedDeviceID = merged.lastModifiedDeviceID
                     existing.syncVersion = max(existing.syncVersion, merged.syncVersion)
+                    result.mergedCount += 1
                 case .askUser:
                     let localDelta = ScheduleDelta(schedule: existing, deviceID: currentDeviceID)
                     let remoteDelta = ScheduleDelta(schedule: remoteSchedule, deviceID: remoteSchedule.lastModifiedDeviceID)
@@ -600,6 +612,7 @@ final class ScheduleViewModel {
                             )
                         )
                     }
+                    result.conflictCount += 1
                 }
                 existing.lastSyncedVersion = existing.syncVersion
                 advanceProgress()
@@ -611,14 +624,16 @@ final class ScheduleViewModel {
             }) {
                 switch SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: sameIdentitySchedule, remoteSchedule: remoteSchedule) {
                 case .keepLocal:
-                    break
+                    result.skippedCount += 1
                 case .keepRemote:
                     apply(backupItem, to: sameIdentitySchedule)
+                    result.mergedCount += 1
                 case .merge(let merged):
                     applyScheduleValues(from: merged, to: sameIdentitySchedule)
                     sameIdentitySchedule.updatedAt = merged.updatedAt
                     sameIdentitySchedule.lastModifiedDeviceID = merged.lastModifiedDeviceID
                     sameIdentitySchedule.syncVersion = max(sameIdentitySchedule.syncVersion, merged.syncVersion)
+                    result.mergedCount += 1
                 case .askUser:
                     let localDelta = ScheduleDelta(schedule: sameIdentitySchedule, deviceID: currentDeviceID)
                     let remoteDelta = ScheduleDelta(schedule: remoteSchedule, deviceID: remoteSchedule.lastModifiedDeviceID)
@@ -631,6 +646,7 @@ final class ScheduleViewModel {
                             )
                         )
                     }
+                    result.conflictCount += 1
                 }
                 sameIdentitySchedule.lastSyncedVersion = sameIdentitySchedule.syncVersion
                 advanceProgress()
@@ -672,6 +688,7 @@ final class ScheduleViewModel {
             restored.lastSyncedVersion = restored.syncVersion
             modelContext.insert(restored)
             existingByID[restored.id] = restored
+            result.restoredCount += 1
             advanceProgress()
         }
 
@@ -683,14 +700,25 @@ final class ScheduleViewModel {
         fetchSchedules()
         pendingConflictScheduleIDs = Array(Set(syncCoordinator.pendingConflictScheduleIDs))
         restoreProgress = 1
+        return result
     }
 
     func syncCloudBackupNowIfSignedIn() {
-        guard !isCloudRestoreInProgress else { return }
-        guard FirebaseSyncService.shared.isSignedIn else { return }
+        guard !isCloudRestoreInProgress else {
+            syncCoordinator.syncLastActivityMessage = "Sync blocked while cloud restore is active."
+            Self.syncLogger.warning("Manual sync blocked: cloud restore gate is active")
+            return
+        }
+        guard FirebaseSyncService.shared.isSignedIn else {
+            syncCoordinator.syncLastActivityMessage = "Sync blocked: account is signed out."
+            Self.syncLogger.warning("Manual sync blocked: user not signed in")
+            return
+        }
         guard FirebaseSyncService.shared.isNetworkReachable else {
             FirebaseSyncService.shared.lastErrorMessage = "No internet connection"
             syncCoordinator.syncState = .error
+            syncCoordinator.syncLastActivityMessage = "Sync blocked: no internet connection."
+            Self.syncLogger.warning("Manual sync blocked: no network reachability")
             return
         }
 
@@ -706,11 +734,42 @@ final class ScheduleViewModel {
     }
 
     func syncNowWithCoordinator(userInitiated: Bool = true) {
-        guard !isSyncNowInProgress else { return }
+        guard !isSyncNowInProgress else {
+            syncCoordinator.syncLastActivityMessage = "Sync already running."
+            Self.syncLogger.info("Manual sync ignored: sync already in progress")
+            return
+        }
         isSyncNowInProgress = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isSyncNowInProgress = false }
+            let hardTimeoutSeconds: Double = 90
+            let timeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(hardTimeoutSeconds))
+                guard let self else { return }
+                guard self.isSyncNowInProgress else { return }
+
+                let lastActivity = self.syncCoordinator.syncLastActivityMessage ?? "Unknown phase"
+                self.syncCoordinator.syncState = .error
+                self.syncCoordinator.syncLastActivityMessage = "Sync timed out. Please try again."
+                self.syncCoordinator.lastSyncReport = SyncRunReport(
+                    deltaPushSucceeded: false,
+                    deltaPullSucceeded: false,
+                    backupUploadSucceeded: false,
+                    offlineQueueChanged: false,
+                    conflictsRemaining: self.syncCoordinator.pendingConflictScheduleIDs.count,
+                    deltaPushCount: 0,
+                    deltaPullCount: 0,
+                    failure: .firestoreFailed("Sync timed out after \(Int(hardTimeoutSeconds))s while: \(lastActivity)"),
+                    warnings: ["Hard timeout released sync lock"]
+                )
+                self.isSyncNowInProgress = false
+                Self.syncLogger.error("Hard timeout released stuck sync after \(hardTimeoutSeconds, privacy: .public)s; last activity=\(lastActivity, privacy: .public)")
+            }
+
+            defer {
+                timeoutTask.cancel()
+                self.isSyncNowInProgress = false
+            }
             await self.syncCoordinator.syncNow(viewModel: self, userInitiated: userInitiated)
             self.pendingConflictScheduleIDs = Array(Set(self.syncCoordinator.pendingConflictScheduleIDs))
         }

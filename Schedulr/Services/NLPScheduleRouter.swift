@@ -99,8 +99,9 @@ actor NLPScheduleRouter {
     func parse(_ input: String) async -> ParseResult {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
+            let emptyParsed = await MainActor.run { NLPScheduleParser.ParsedSchedule() }
             return ParseResult(
-                parsed: NLPScheduleParser.ParsedSchedule(),
+                parsed: emptyParsed,
                 source: .localFallback,
                 internetUnavailable: false
             )
@@ -110,8 +111,9 @@ actor NLPScheduleRouter {
             let parsed = try await parseViaCloud(trimmed)
             return ParseResult(parsed: parsed, source: .cloud, internetUnavailable: false)
         } catch {
+            let fallbackParsed = await MainActor.run { NLPScheduleParser.parse(trimmed) }
             return ParseResult(
-                parsed: NLPScheduleParser.parse(trimmed),
+                parsed: fallbackParsed,
                 source: .localFallback,
                 internetUnavailable: isInternetUnavailable(error)
             )
@@ -174,7 +176,7 @@ actor NLPScheduleRouter {
         }
 
         let decoded = try decodeCloudResponse(data)
-        return mapCloudResponse(decoded)
+        return await mapCloudResponse(decoded)
     }
 
     private func parseViaGemini(_ input: String, apiKey: String) async throws -> NLPScheduleParser.ParsedSchedule {
@@ -228,7 +230,7 @@ actor NLPScheduleRouter {
         }
 
         let decoded = try decodeCloudResponse(jsonData)
-        return mapCloudResponse(decoded)
+        return await mapCloudResponse(decoded)
     }
 
     private func resolveProxyURL() -> URL? {
@@ -281,8 +283,8 @@ actor NLPScheduleRouter {
         }
     }
 
-    private func mapCloudResponse(_ response: CloudResponseBody) -> NLPScheduleParser.ParsedSchedule {
-        var parsed = NLPScheduleParser.ParsedSchedule()
+    private func mapCloudResponse(_ response: CloudResponseBody) async -> NLPScheduleParser.ParsedSchedule {
+        var parsed = await MainActor.run { NLPScheduleParser.ParsedSchedule() }
         parsed.title = response.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if let dateText = response.dateISO8601,

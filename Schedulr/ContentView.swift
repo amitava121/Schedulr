@@ -112,7 +112,7 @@ struct ContentView: View {
                 .onChange(of: navigationPath) { _, path in
                     syncZoomLevelForNavigationPath(path)
                 }
-                .onChange(of: firebaseService.isSignedIn) { _, isSignedIn in
+                .onChange(of: firebaseService.isSignedIn) { wasSignedIn, isSignedIn in
                     isSignedInForWeekToolbar = isSignedIn
 
                     if !isSignedIn {
@@ -125,6 +125,10 @@ struct ContentView: View {
                         viewModel.completeCloudRestoreGate()
                         return
                     }
+
+                    // Ignore same-value updates (for example token refresh churn)
+                    // so we do not collapse sheet stacks while already signed in.
+                    guard !wasSignedIn else { return }
 
                     // After any successful auth, always return to Account page
                     // once the cloud backup check flow completes.
@@ -284,12 +288,12 @@ struct ContentView: View {
                                     viewModel.completeCloudRestoreGate()
                                 }
 
-                                viewModel.importBackupData(
+                                let result = viewModel.importBackupData(
                                     data,
                                     includeSchedules: restoreSchedulesFromCloud,
                                     includeSettings: restoreSettingsFromCloud
                                 )
-                                showCloudRestoreStatus("Cloud data restored")
+                                showCloudRestoreStatus(result.userMessage)
                                 redirectAfterCloudRestoreFlowIfNeeded()
                             }
                         }
@@ -845,9 +849,12 @@ struct ContentView: View {
 
         viewModel.beginCloudRestoreGate()
         Task {
-            if let backup = await firebaseService.downloadBackup(), !backup.data.isEmpty {
-                let signature = cloudBackupSignature(data: backup.data, globalVersion: backup.globalSyncVersion)
-                await MainActor.run {
+            let result = await firebaseService.downloadBackupWithResult()
+
+            await MainActor.run {
+                switch result {
+                case .success(let backup) where !backup.data.isEmpty:
+                    let signature = cloudBackupSignature(data: backup.data, globalVersion: backup.globalSyncVersion)
                     if let handledSignature = handledCloudBackupPromptSignature(), handledSignature == signature {
                         pendingCloudBackupSignature = nil
                         pendingCloudBackupData = nil
@@ -865,19 +872,43 @@ struct ContentView: View {
                     restoreSchedulesFromCloud = true
                     restoreSettingsFromCloud = true
                     showCloudRestorePrompt = true
-                }
-                return
-            }
 
-            await MainActor.run {
-                pendingCloudBackupSignature = nil
-                viewModel.completeCloudRestoreGate()
-                if showSuccessBanner {
-                    showCloudRestoreStatus("No cloud backup found")
+                case .missingBackup, .success:
+                    pendingCloudBackupSignature = nil
+                    viewModel.completeCloudRestoreGate()
+                    if showSuccessBanner {
+                        showCloudRestoreStatus("No cloud backup found")
+                    }
+                    viewModel.syncCloudBackupNowIfSignedIn()
+                    redirectAfterCloudRestoreFlowIfNeeded()
+
+                case .notConfigured, .authFailed:
+                    viewModel.completeCloudRestoreGate()
+                    redirectAfterCloudRestoreFlowIfNeeded()
+
+                case .networkError(let msg):
+                    viewModel.completeCloudRestoreGate()
+                    showCloudRestoreStatus("Restore failed: \(msg)")
+                    redirectAfterCloudRestoreFlowIfNeeded()
+
+                case .decodeFailed(let msg):
+                    viewModel.completeCloudRestoreGate()
+                    showCloudRestoreStatus("Backup corrupt: \(msg)")
+                    redirectAfterCloudRestoreFlowIfNeeded()
+
+                case .cacheFallback(let backup):
+                    if !backup.data.isEmpty {
+                        pendingCloudBackupData = backup.data
+                        pendingCloudBackupSignature = cloudBackupSignature(data: backup.data, globalVersion: backup.globalSyncVersion)
+                        restoreSchedulesFromCloud = true
+                        restoreSettingsFromCloud = true
+                        showCloudRestorePrompt = true
+                    } else {
+                        viewModel.completeCloudRestoreGate()
+                        showCloudRestoreStatus("Using cached backup (offline)")
+                        redirectAfterCloudRestoreFlowIfNeeded()
+                    }
                 }
-                // Cloud is empty for this account; push local state once to bootstrap sync.
-                viewModel.syncCloudBackupNowIfSignedIn()
-                redirectAfterCloudRestoreFlowIfNeeded()
             }
         }
     }
@@ -901,7 +932,10 @@ struct ContentView: View {
         guard !showCloudRestorePrompt else { return }
         guard pendingCloudBackupData == nil else { return }
         guard !viewModel.isRestoreInProgress else { return }
-        viewModel.importBackupData(data)
+        let result = viewModel.importBackupData(data)
+        if !result.succeeded {
+            showCloudRestoreStatus(result.userMessage)
+        }
     }
 
     private func showCloudRestoreStatus(_ message: String) {

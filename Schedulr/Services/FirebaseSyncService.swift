@@ -3,6 +3,9 @@ import Network
 import FirebaseAuth
 import FirebaseCore
 import FirebaseFirestore
+#if canImport(FirebaseStorage)
+import FirebaseStorage
+#endif
 
 enum NetworkCondition {
     case offline
@@ -36,6 +39,20 @@ enum FirebaseSyncError: LocalizedError {
             return "A conflicting delta exists for this schedule."
         case .retryExhausted:
             return "Sync retry attempts exhausted."
+        }
+    }
+}
+
+enum ProfileMetadataError: LocalizedError {
+    case storageUploadFailed
+    case invalidPhotoURL
+
+    var errorDescription: String? {
+        switch self {
+        case .storageUploadFailed:
+            return "Profile photo upload failed."
+        case .invalidPhotoURL:
+            return "Uploaded profile photo URL is invalid."
         }
     }
 }
@@ -317,6 +334,35 @@ struct CloudBackupDownload {
     var globalSyncVersion: Int?
 }
 
+enum BackupDownloadResult {
+    case success(CloudBackupDownload)
+    case missingBackup
+    case notConfigured
+    case authFailed
+    case networkError(String)
+    case decodeFailed(String)
+    case cacheFallback(CloudBackupDownload)
+
+    var backup: CloudBackupDownload? {
+        switch self {
+        case .success(let b), .cacheFallback(let b): return b
+        default: return nil
+        }
+    }
+
+    var userMessage: String {
+        switch self {
+        case .success: return "Cloud backup downloaded."
+        case .missingBackup: return "No cloud backup found for this account."
+        case .notConfigured: return "Firebase is not configured."
+        case .authFailed: return "Not signed in."
+        case .networkError(let detail): return "Network error: \(detail)"
+        case .decodeFailed(let detail): return "Cloud data is unreadable: \(detail)"
+        case .cacheFallback: return "Using cached backup (server unreachable)."
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class FirebaseSyncService {
@@ -514,6 +560,41 @@ final class FirebaseSyncService {
         }
     }
 
+    private func remoteProfilePhotoData(from url: URL) async -> Data? {
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  !data.isEmpty
+            else {
+                return nil
+            }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    private func uploadProfilePhoto(userID: String, photoData: Data) async throws -> URL {
+#if canImport(FirebaseStorage)
+        let storagePath = "users/\(userID)/profile_image.jpg"
+        let storageRef = Storage.storage().reference().child(storagePath)
+        let metadata = StorageMetadata()
+        metadata.contentType = "image/jpeg"
+
+        _ = try await storageRef.putDataAsync(photoData, metadata: metadata)
+        let downloadURL = try await storageRef.downloadURL()
+        guard !downloadURL.absoluteString.isEmpty else {
+            throw ProfileMetadataError.invalidPhotoURL
+        }
+        return downloadURL
+#else
+        _ = userID
+        _ = photoData
+        throw ProfileMetadataError.storageUploadFailed
+#endif
+    }
+
     private func applyProfileFields(from data: [String: Any], fallbackEmail: String?) {
         let cloudDisplayName = (data["profileDisplayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let authDisplayName = Auth.auth().currentUser?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -524,6 +605,18 @@ final class FirebaseSyncService {
             profileDisplayName = authDisplayName
         } else {
             profileDisplayName = fallbackDisplayName(from: fallbackEmail)
+        }
+
+        if let photoURLString = (data["profilePhotoURL"] as? String) ?? (data["photoURL"] as? String),
+           let photoURL = URL(string: photoURLString)
+        {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let downloaded = await self.remoteProfilePhotoData(from: photoURL) {
+                    self.profilePhotoData = downloaded
+                }
+            }
+            return
         }
 
         if let base64 = data["profilePhotoBase64"] as? String,
@@ -616,21 +709,36 @@ final class FirebaseSyncService {
             }
         }
 
-        if let photoData {
-            payload["profilePhotoBase64"] = photoData.base64EncodedString()
-        }
-
         do {
-            let userDocument = firestore.collection("users").document(user.uid)
-            try await userDocument.setData(payload, merge: true)
-            try await persistProfileDocument(userID: user.uid, payload: payload)
+            var uploadedPhotoURL: URL?
+            if let photoData {
+                uploadedPhotoURL = try await uploadProfilePhoto(userID: user.uid, photoData: photoData)
+                guard let uploadedPhotoURL else { throw ProfileMetadataError.storageUploadFailed }
+                payload["profilePhotoURL"] = uploadedPhotoURL.absoluteString
+                payload["photoURL"] = uploadedPhotoURL.absoluteString
+                // Clear oversized legacy payload when URL-backed photo storage is active.
+                payload["profilePhotoBase64"] = FieldValue.delete()
+            }
 
-            if let displayName,
-               !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
+            let userDocument = firestore.collection("users").document(user.uid)
+            let profileDocument = userDocument.collection("profile").document("current")
+            let batch = firestore.batch()
+            batch.setData(payload, forDocument: userDocument, merge: true)
+            batch.setData(payload, forDocument: profileDocument, merge: true)
+            try await batch.commit()
+
+            let hasDisplayNameChange = displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            if hasDisplayNameChange || uploadedPhotoURL != nil {
                 let request = user.createProfileChangeRequest()
-                request.displayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-                try? await request.commitChanges()
+                if let displayName,
+                   !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    request.displayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if let uploadedPhotoURL {
+                    request.photoURL = uploadedPhotoURL
+                }
+                try await request.commitChanges()
             }
 
             if let displayName,
@@ -670,9 +778,14 @@ final class FirebaseSyncService {
             let existingPhotoBase64 = ((profileSnapshot?.data()?["profilePhotoBase64"] as? String)
                 ?? (snapshot?.data()?["profilePhotoBase64"] as? String))?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            let existingPhotoURL = ((profileSnapshot?.data()?["profilePhotoURL"] as? String)
+                ?? (snapshot?.data()?["profilePhotoURL"] as? String)
+                ?? (profileSnapshot?.data()?["photoURL"] as? String)
+                ?? (snapshot?.data()?["photoURL"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
             let needsNameSeed = existingName?.isEmpty != false
-            let needsPhotoSeed = existingPhotoBase64?.isEmpty != false
+            let needsPhotoSeed = (existingPhotoURL?.isEmpty != false) && (existingPhotoBase64?.isEmpty != false)
 
             if needsNameSeed || needsPhotoSeed {
                 var payload: [String: Any] = [
@@ -686,7 +799,13 @@ final class FirebaseSyncService {
                 }
 
                 if needsPhotoSeed, let authPhoto = await authProfilePhotoData(for: user) {
-                    payload["profilePhotoBase64"] = authPhoto.base64EncodedString()
+                    if let uploadedURL = try? await uploadProfilePhoto(userID: user.uid, photoData: authPhoto) {
+                        payload["profilePhotoURL"] = uploadedURL.absoluteString
+                        payload["photoURL"] = uploadedURL.absoluteString
+                        payload["profilePhotoBase64"] = FieldValue.delete()
+                    } else {
+                        payload["profilePhotoBase64"] = authPhoto.base64EncodedString()
+                    }
                     profilePhotoData = authPhoto
                 }
 
@@ -975,11 +1094,14 @@ final class FirebaseSyncService {
                 throw FirebaseSyncError.staleVersion
             }
 
-            try await persistStructuredBackupData(
-                from: backupData,
-                userDocument: document,
-                globalSyncVersion: currentVersion
-            )
+            let needsStructured = backupData.count > Self.inlineBackupByteLimit
+            if needsStructured {
+                try await persistStructuredBackupData(
+                    from: backupData,
+                    userDocument: document,
+                    globalSyncVersion: currentVersion
+                )
+            }
             let payload = makeUserBackupPayload(
                 email: user.email,
                 backupData: backupData,
@@ -997,14 +1119,19 @@ final class FirebaseSyncService {
     }
 
     func downloadBackup() async -> CloudBackupDownload? {
+        let result = await downloadBackupWithResult()
+        return result.backup
+    }
+
+    func downloadBackupWithResult() async -> BackupDownloadResult {
         guard FirebaseApp.app() != nil else {
             lastErrorMessage = FirebaseSyncError.notConfigured.localizedDescription
-            return nil
+            return .notConfigured
         }
 
         guard let user = Auth.auth().currentUser else {
             lastErrorMessage = FirebaseSyncError.authFailed.localizedDescription
-            return nil
+            return .authFailed
         }
 
         isBusy = true
@@ -1019,7 +1146,7 @@ final class FirebaseSyncService {
                     lastSyncedAt = updatedAt.dateValue()
                 }
                 lastErrorMessage = nil
-                return backup
+                return .success(backup)
             }
 
             if let structuredBackup = await structuredBackupData(
@@ -1031,11 +1158,13 @@ final class FirebaseSyncService {
                     lastSyncedAt = updatedAt.dateValue()
                 }
                 lastErrorMessage = nil
-                return structuredBackup
+                return .success(structuredBackup)
             }
 
-            throw FirebaseSyncError.missingBackup
+            lastErrorMessage = FirebaseSyncError.missingBackup.localizedDescription
+            return .missingBackup
         } catch {
+            // Server unavailable — fall back to cache.
             do {
                 let cacheSnapshot = try await document.getDocument(source: .cache)
                 if let backup = backupData(from: cacheSnapshot) {
@@ -1043,7 +1172,7 @@ final class FirebaseSyncService {
                         lastSyncedAt = updatedAt.dateValue()
                     }
                     lastErrorMessage = nil
-                    return backup
+                    return .cacheFallback(backup)
                 }
 
                 if let structuredBackup = await structuredBackupData(
@@ -1055,13 +1184,15 @@ final class FirebaseSyncService {
                         lastSyncedAt = updatedAt.dateValue()
                     }
                     lastErrorMessage = nil
-                    return structuredBackup
+                    return .cacheFallback(structuredBackup)
                 }
 
-                throw FirebaseSyncError.missingBackup
+                lastErrorMessage = FirebaseSyncError.missingBackup.localizedDescription
+                return .missingBackup
             } catch {
-                lastErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                return nil
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                lastErrorMessage = message
+                return .networkError(message)
             }
         }
     }

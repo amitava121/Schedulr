@@ -383,13 +383,18 @@ struct MonthCellContent: View {
                 .font(.system(size: 32, weight: .bold))
                 .padding(.horizontal, 4)
 
-            // Weekday symbols
+            // Weekday symbols aligned with day columns (after week-number gutter).
             HStack(spacing: 8) {
-                ForEach(weekdaySymbols, id: \.self) { symbol in
-                    Text(symbol)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
+                Color.clear
+                    .frame(width: 22, height: 1)
+
+                HStack(spacing: 8) {
+                    ForEach(weekdaySymbols, id: \.self) { symbol in
+                        Text(symbol)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             }
             .padding(.horizontal, 2)
