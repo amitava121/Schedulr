@@ -1802,7 +1802,7 @@ final class SafeImageFlowManager: NSObject, PHPickerViewControllerDelegate {
         rootVC.view.backgroundColor = .clear
         window.rootViewController = rootVC
 
-        // CRITICAL FIX: Do NOT use makeKeyAndVisible().
+        // CRITICAL WORKAROUND: Do NOT use makeKeyAndVisible().
         // By only using .isHidden = false, this window floats above the app but NEVER steals the responder chain.
         // SwiftUI is completely blind to it, so Face ID will never crash your underlying sheet.
         window.windowLevel = .normal + 1
