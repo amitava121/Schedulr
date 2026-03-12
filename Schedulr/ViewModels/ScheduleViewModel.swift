@@ -2242,10 +2242,15 @@ final class ScheduleViewModel {
         let scheduleCalendar = scheduleCalendar(for: schedule, base: calendar)
         let startDay = scheduleCalendar.startOfDay(for: schedule.scheduledDate)
         let targetDay = scheduleCalendar.startOfDay(for: day)
-        let excludedDays = Set(schedule.excludedOccurrenceDates.map { scheduleCalendar.startOfDay(for: $0) })
 
         guard targetDay >= startDay else { return false }
-        guard !excludedDays.contains(targetDay) else { return false }
+
+        // ⚡ Bolt Optimization: Avoid allocating an Array and Set on every `occurs` call
+        // `excludedOccurrenceDates` is usually small, so linear search is faster than
+        // allocating new collections when this is called frequently (e.g. in loops)
+        if schedule.excludedOccurrenceDates.contains(where: { scheduleCalendar.startOfDay(for: $0) == targetDay }) {
+            return false
+        }
 
         if schedule.repeatEndOption == .onDate,
            let endDateRaw = schedule.repeatEndDate,
@@ -2331,7 +2336,10 @@ final class ScheduleViewModel {
         let startDay = calendar.startOfDay(for: schedule.scheduledDate)
         var count = 0
         var current = startDay
-        let excludedDays = Set(schedule.excludedOccurrenceDates.map { calendar.startOfDay(for: $0) })
+
+        // ⚡ Bolt Optimization: Use a local Set but compute it lazily ONLY if there are actually excluded dates.
+        // It's worth building a Set here because we are in a loop (`current < targetDay`).
+        let excludedDays = schedule.excludedOccurrenceDates.isEmpty ? Set<Date>() : Set(schedule.excludedOccurrenceDates.map { calendar.startOfDay(for: $0) })
 
         // Limit iteration to avoid infinite loops
         let maxIterations = schedule.repeatEndCount + 100

@@ -1,0 +1,3 @@
+## 2024-03-12 - Swift Collection Allocation Overhead in Hot Paths
+**Learning:** In Swift, chaining `.map` into `Set()` within a hot path (like calculating daily recurrences for a calendar view) forces intermediate Array allocations and Set hashing for every single call. For small collections like `excludedOccurrenceDates`, the overhead of memory allocation completely dwarfs the O(1) lookup benefit of the Set.
+**Action:** When searching small arrays in frequently called methods, prefer `.contains(where:)` to avoid allocating intermediate collections. If a `Set` is absolutely necessary for O(1) lookups inside a loop, initialize it lazily (check `.isEmpty` first) to avoid allocations for empty states.
