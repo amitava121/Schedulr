@@ -45,6 +45,10 @@ final class ScheduleViewModel {
         subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
         category: "sync"
     )
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "ScheduleViewModel"
+    )
     private static let recurringCompletionStorageKey = "scheduleRecurringCompletion.v1"
     private static let widgetAppGroupID = "group.com.bittu.Schedulr"
     private static let widgetSnapshotKey = "widget.scheduleSnapshot.v1"
@@ -1539,7 +1543,7 @@ final class ScheduleViewModel {
         do {
             try modelContext.save()
         } catch {
-            print("Save error: \(error)")
+            Self.logger.error("Save error: \(error.localizedDescription, privacy: .public)")
         }
     }
 
