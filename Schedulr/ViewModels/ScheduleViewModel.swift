@@ -383,10 +383,12 @@ final class ScheduleViewModel {
         isLoading = true
         defer { isLoading = false }
         do {
+            let predicate = #Predicate<Schedule> { !$0.isSoftDeleted }
             let descriptor = FetchDescriptor<Schedule>(
+                predicate: predicate,
                 sortBy: [SortDescriptor(\.scheduledDate)]
             )
-            schedules = try modelContext.fetch(descriptor).filter { !$0.isSoftDeleted }
+            schedules = try modelContext.fetch(descriptor)
             resolveScheduleConflictsByLatestUpdate()
             pruneRecurringCompletionState()
             normalizeSchedules(immediate: true)
