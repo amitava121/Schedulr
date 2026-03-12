@@ -431,19 +431,90 @@ final class ScheduleViewModel {
         var summary: [Date: HeatmapDaySummary] = [:]
         summary.reserveCapacity(monthRange.count)
 
-        for day in monthRange {
-            guard let currentDay = calendar.date(byAdding: .day, value: day - 1, to: monthStart)?.startOfDay else {
+        let monthDays = monthRange.compactMap { day in
+            calendar.date(byAdding: .day, value: day - 1, to: monthStart)?.startOfDay
+        }
+
+        // ⚡ Bolt: Initialize summaries
+        var totals: [Date: Int] = [:]
+        var completeds: [Date: Int] = [:]
+        for day in monthDays {
+            totals[day] = 0
+            completeds[day] = 0
+        }
+
+        guard let firstMonthDay = monthDays.first, let lastMonthDay = monthDays.last else {
+            return [:]
+        }
+
+        // ⚡ Bolt: Iterate over visible schedules instead of iterating over days first
+        // Hoists expensive calendar initializations and avoids recalculating `startDay` 30+ times per schedule.
+        for schedule in visible {
+            guard !schedule.isSoftDeleted else { continue }
+
+            let scheduleCalendar = scheduleCalendar(for: schedule, base: calendar)
+            let startDay = scheduleCalendar.startOfDay(for: schedule.scheduledDate)
+
+            // Skip entirely if schedule starts after the month ends
+            if startDay > lastMonthDay {
                 continue
             }
 
-            let occurring = visible.filter { schedule in
-                occurs(schedule, on: currentDay, calendar: calendar)
+            // Skip entirely if schedule ends before the month starts
+            if schedule.repeatEndOption == .onDate,
+               let endDateRaw = schedule.repeatEndDate,
+               let endDate = Optional(scheduleCalendar.startOfDay(for: endDateRaw)),
+               endDate < firstMonthDay
+            {
+                continue
             }
-            let completed = occurring.filter { schedule in
-                isScheduleCompleted(schedule, on: currentDay)
-            }.count
 
-            summary[currentDay] = HeatmapDaySummary(total: occurring.count, completed: completed)
+            let excludedDays = schedule.excludedOccurrenceDates.map { scheduleCalendar.startOfDay(for: $0) }
+
+            // For afterCount, we can't easily skip without counting, but we can do normal `occurs` logic
+            for day in monthDays {
+                // Inline parts of `occurs` for performance using precalculated `startDay` and `excludedDays`
+                let targetDay = day // already start of day
+                guard targetDay >= startDay else { continue }
+
+                if excludedDays.contains(targetDay) {
+                    continue
+                }
+
+                if schedule.repeatEndOption == .onDate,
+                   let endDateRaw = schedule.repeatEndDate,
+                   let endDate = Optional(scheduleCalendar.startOfDay(for: endDateRaw)),
+                   targetDay > endDate
+                {
+                    continue
+                }
+
+                if schedule.repeatEndOption == .afterCount, schedule.repeatEndCount > 0 {
+                    let count = countOccurrences(of: schedule, before: targetDay, calendar: scheduleCalendar)
+                    if count >= schedule.repeatEndCount { continue }
+                }
+
+                let matches = matchesRepeatPattern(
+                    schedule,
+                    startDay: startDay,
+                    targetDay: targetDay,
+                    calendar: scheduleCalendar
+                )
+
+                if matches {
+                    totals[day, default: 0] += 1
+                    if isScheduleCompleted(schedule, on: day) {
+                        completeds[day, default: 0] += 1
+                    }
+                }
+            }
+        }
+
+        for day in monthDays {
+            summary[day] = HeatmapDaySummary(
+                total: totals[day] ?? 0,
+                completed: completeds[day] ?? 0
+            )
         }
 
         return summary
