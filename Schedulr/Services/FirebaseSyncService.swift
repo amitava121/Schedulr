@@ -4,6 +4,7 @@ import SwiftData
 import FirebaseAuth
 import FirebaseCore
 import FirebaseFirestore
+import SchedulrLogic
 #if canImport(FirebaseStorage)
 import FirebaseStorage
 #endif
@@ -374,12 +375,6 @@ final class FirebaseSyncService {
     private static let legacyFirestoreDatabaseInfoKey = "FirestoreDatabaseID"
     private static let inlineBackupByteLimit = 700_000
     private static let legacyGranularMigrationStateKey = "sync.legacyGranularMigrationState.v1"
-
-    private static let iso8601WithFractionalSecondsFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
 
     private static let iso8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -1403,7 +1398,7 @@ final class FirebaseSyncService {
             return Timestamp(date: date)
         }
         if let text = value as? String,
-           let date = Self.iso8601WithFractionalSecondsFormatter.date(from: text)
+           let date = SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.date(from: text)
             ?? Self.iso8601Formatter.date(from: text)
         {
             return Timestamp(date: date)
@@ -1453,7 +1448,7 @@ final class FirebaseSyncService {
 
             var payload: [String: Any] = [
                 "version": 2,
-                "exportedAt": Self.iso8601WithFractionalSecondsFormatter.string(from: Date()),
+                "exportedAt": SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.string(from: Date()),
                 "schedules": schedulePayload
             ]
 
@@ -1501,39 +1496,10 @@ final class FirebaseSyncService {
     }
 
     private func jsonCompatibleValue(from value: Any) -> Any? {
-        switch value {
-        case let timestamp as Timestamp:
-            return Self.iso8601WithFractionalSecondsFormatter.string(from: timestamp.dateValue())
-        case let date as Date:
-            return Self.iso8601WithFractionalSecondsFormatter.string(from: date)
-        case let string as String:
-            return string
-        case let bool as Bool:
-            return bool
-        case let int as Int:
-            return int
-        case let double as Double:
-            return double.isFinite ? double : nil
-        case let number as NSNumber:
-            return number
-        case let array as [Any]:
-            return array.map { element -> Any in
-                if element is NSNull { return NSNull() }
-                return jsonCompatibleValue(from: element) ?? NSNull()
+        return SchedulrLogic.JSONSerializationUtils.jsonCompatibleValue(from: value) { customValue in
+            if let timestamp = customValue as? Timestamp {
+                return SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.string(from: timestamp.dateValue())
             }
-        case let dictionary as [String: Any]:
-            var normalized: [String: Any] = [:]
-            for (key, nestedValue) in dictionary {
-                if nestedValue is NSNull {
-                    normalized[key] = NSNull()
-                } else if let mapped = jsonCompatibleValue(from: nestedValue) {
-                    normalized[key] = mapped
-                }
-            }
-            return normalized
-        case is NSNull:
-            return NSNull()
-        default:
             return nil
         }
     }
