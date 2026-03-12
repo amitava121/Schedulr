@@ -1214,7 +1214,7 @@ struct FirebaseAccountView: View {
             return nil
         }
 
-        let hash = Insecure.MD5.hash(data: Data(email.utf8))
+        let hash = SHA256.hash(data: Data(email.utf8))
             .map { String(format: "%02hhx", $0) }
             .joined()
         return URL(string: "https://www.gravatar.com/avatar/\(hash)?d=404&s=160")
