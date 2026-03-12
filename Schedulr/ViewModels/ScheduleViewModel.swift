@@ -530,7 +530,9 @@ final class ScheduleViewModel {
         _ data: Data,
         includeSchedules: Bool = true,
         includeSettings: Bool = true,
-        preferRemoteOnConflict: Bool = false
+        preferRemoteOnConflict: Bool = false,
+        forceApplySettingsFromBackup: Bool = false,
+        replaceLocalSchedulesWithBackup: Bool = false
     ) -> RestoreResult {
         guard let modelContext else { return RestoreResult(failure: .noModelContext) }
         let decoder = JSONDecoder()
@@ -563,7 +565,7 @@ final class ScheduleViewModel {
         }
 
         if includeSettings, let backupSettings = payload.appSettings {
-            applyBackupAppSettings(backupSettings)
+            applyBackupAppSettings(backupSettings, forceApply: forceApplySettingsFromBackup)
             result.settingsApplied = true
         }
         advanceProgress()
@@ -585,6 +587,8 @@ final class ScheduleViewModel {
 
         let allRecords = (try? modelContext.fetch(FetchDescriptor<Schedule>())) ?? []
         var existingByID = Dictionary(uniqueKeysWithValues: allRecords.map { ($0.id, $0) })
+
+        let backupIDs = Set(payload.schedules.map(\.id))
 
         for backupItem in payload.schedules {
             let remoteSchedule = scheduleFromBackupItem(backupItem)
@@ -698,6 +702,15 @@ final class ScheduleViewModel {
             existingByID[restored.id] = restored
             result.restoredCount += 1
             advanceProgress()
+        }
+
+        if replaceLocalSchedulesWithBackup {
+            let now = Date()
+            for local in allRecords where !backupIDs.contains(local.id) {
+                local.isSoftDeleted = true
+                local.deletedAt = now
+                local.updatedAt = now
+            }
         }
 
         if let restoredSyncVersion = payload.globalSyncVersion {
@@ -900,7 +913,7 @@ final class ScheduleViewModel {
             refreshUndoRedoState()
         }
         normalizeSchedules()
-        RealtimeSyncCoordinator.shared.pushLocalDeletion(scheduleID: schedule.id.uuidString)
+        RealtimeSyncCoordinator.shared.pushLocalDeletion(schedule: schedule)
         HapticManager.notification(.warning)
     }
 
@@ -1469,10 +1482,10 @@ final class ScheduleViewModel {
         )
     }
 
-    private func applyBackupAppSettings(_ backup: BackupAppSettings) {
+    private func applyBackupAppSettings(_ backup: BackupAppSettings, forceApply: Bool = false) {
         let settings = AppSettings.shared
         let incomingUpdatedAt = backup.settingsUpdatedAt ?? .distantPast
-        guard incomingUpdatedAt > settings.settingsUpdatedAt else { return }
+        guard forceApply || incomingUpdatedAt > settings.settingsUpdatedAt else { return }
 
         settings.beginSettingsBatchUpdate()
         settings.defaultAlertStyle = backup.defaultAlertStyle

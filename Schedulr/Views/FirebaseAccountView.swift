@@ -792,7 +792,9 @@ struct FirebaseAccountView: View {
                                     backup.data,
                                     includeSchedules: true,
                                     includeSettings: true,
-                                    preferRemoteOnConflict: true
+                                    preferRemoteOnConflict: true,
+                                    forceApplySettingsFromBackup: true,
+                                    replaceLocalSchedulesWithBackup: true
                                 )
                                 manualRestoreStatusMessage = restoreResult.userMessage
 
@@ -816,7 +818,9 @@ struct FirebaseAccountView: View {
                                     backup.data,
                                     includeSchedules: true,
                                     includeSettings: true,
-                                    preferRemoteOnConflict: true
+                                    preferRemoteOnConflict: true,
+                                    forceApplySettingsFromBackup: true,
+                                    replaceLocalSchedulesWithBackup: true
                                 )
                                 manualRestoreStatusMessage = restoreResult.userMessage + " (cached)"
 

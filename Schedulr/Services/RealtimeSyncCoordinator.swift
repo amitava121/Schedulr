@@ -1,7 +1,7 @@
 import Foundation
 import SwiftData
 import FirebaseAuth
-import FirebaseFirestore
+@preconcurrency import FirebaseFirestore
 
 @MainActor
 final class RealtimeSyncCoordinator {
@@ -9,6 +9,7 @@ final class RealtimeSyncCoordinator {
 
     private var listener: ListenerRegistration?
     private let db: Firestore
+    private var activeContext: ModelContext?
 
     private init() {
         let firestore = Firestore.firestore()
@@ -17,6 +18,7 @@ final class RealtimeSyncCoordinator {
     }
 
     func startListening(context: ModelContext) {
+        activeContext = context
         guard let uid = Auth.auth().currentUser?.uid else {
             stopListening()
             return
@@ -58,10 +60,17 @@ final class RealtimeSyncCoordinator {
     func stopListening() {
         listener?.remove()
         listener = nil
+        activeContext = nil
     }
 
     func pushLocalChange(schedule: Schedule) {
-        guard let uid = Auth.auth().currentUser?.uid else { return }
+        guard let uid = Auth.auth().currentUser?.uid else {
+            schedule.syncStatus = "failed"
+            return
+        }
+
+        let scheduleID = schedule.id
+        schedule.syncStatus = "pending"
 
         var payload = scheduleDictionary(from: schedule)
         payload["updatedAt"] = FieldValue.serverTimestamp()
@@ -69,15 +78,68 @@ final class RealtimeSyncCoordinator {
 
         db.collection("users").document(uid).collection("schedules")
             .document(schedule.id.uuidString)
-            .setData(payload, merge: true)
+            .setData(payload, merge: true) { error in
+                DispatchQueue.main.async {
+                    self.updateLocalSyncStatus(scheduleID: scheduleID, status: (error == nil) ? "synced" : "failed")
+                }
+            }
     }
 
-    func pushLocalDeletion(scheduleID: String) {
-        guard let uid = Auth.auth().currentUser?.uid else { return }
+    func pushGranularChange(schedule: Schedule, changedFields: [String: Any]) {
+        guard let uid = Auth.auth().currentUser?.uid else {
+            schedule.syncStatus = "failed"
+            return
+        }
+
+        let scheduleID = schedule.id
+        schedule.syncStatus = "pending"
+
+        var payload = changedFields
+        payload["updatedAt"] = FieldValue.serverTimestamp()
+        payload["clientUpdatedAt"] = Timestamp(date: schedule.updatedAt)
 
         db.collection("users").document(uid).collection("schedules")
-            .document(scheduleID)
-            .delete()
+            .document(schedule.id.uuidString)
+            .setData(payload, merge: true) { error in
+                DispatchQueue.main.async {
+                    self.updateLocalSyncStatus(scheduleID: scheduleID, status: (error == nil) ? "synced" : "failed")
+                }
+            }
+    }
+
+    func pushLocalDeletion(schedule: Schedule) {
+        guard let uid = Auth.auth().currentUser?.uid else {
+            schedule.syncStatus = "failed"
+            return
+        }
+
+        let scheduleID = schedule.id
+        schedule.isSoftDeleted = true
+        schedule.deletedAt = Date()
+        schedule.updatedAt = Date()
+        schedule.syncStatus = "pending"
+
+        db.collection("users").document(uid).collection("schedules")
+            .document(schedule.id.uuidString)
+            .setData([
+                "isSoftDeleted": true,
+                "deletedAt": FieldValue.serverTimestamp(),
+                "updatedAt": FieldValue.serverTimestamp(),
+                "clientUpdatedAt": Timestamp(date: schedule.updatedAt)
+            ], merge: true) { error in
+                DispatchQueue.main.async {
+                    self.updateLocalSyncStatus(scheduleID: scheduleID, status: (error == nil) ? "synced" : "failed")
+                }
+            }
+    }
+
+    private func updateLocalSyncStatus(scheduleID: UUID, status: String) {
+        guard let context = activeContext else { return }
+        let descriptor = FetchDescriptor<Schedule>(predicate: #Predicate { $0.id == scheduleID })
+        if let schedule = try? context.fetch(descriptor).first {
+            schedule.syncStatus = status
+            try? context.save()
+        }
     }
 
     private func processIncomingCloudChange(data: [String: Any], documentID: String, context: ModelContext) {
@@ -116,7 +178,9 @@ final class RealtimeSyncCoordinator {
         guard let scheduleID = UUID(uuidString: documentID) else { return }
         let descriptor = FetchDescriptor<Schedule>(predicate: #Predicate { $0.id == scheduleID })
         if let localMatch = try? context.fetch(descriptor).first {
-            context.delete(localMatch)
+            localMatch.isSoftDeleted = true
+            localMatch.deletedAt = localMatch.deletedAt ?? Date()
+            localMatch.syncStatus = "synced"
         }
     }
 
@@ -157,6 +221,7 @@ final class RealtimeSyncCoordinator {
             isCompleted: boolValue(data["isCompleted"]) ?? false,
             priority: SchedulePriority(rawValue: intValue(data["priorityRaw"]) ?? 0) ?? .none
         )
+        schedule.syncStatus = "synced"
         return schedule
     }
 
@@ -193,6 +258,7 @@ final class RealtimeSyncCoordinator {
         schedule.isFlagged = boolValue(data["isFlagged"]) ?? schedule.isFlagged
         schedule.isCompleted = boolValue(data["isCompleted"]) ?? schedule.isCompleted
         schedule.priorityRaw = intValue(data["priorityRaw"]) ?? schedule.priorityRaw
+        schedule.syncStatus = "synced"
     }
 
     private func scheduleDictionary(from schedule: Schedule) -> [String: Any] {

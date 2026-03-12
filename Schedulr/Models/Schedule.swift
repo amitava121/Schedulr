@@ -605,6 +605,7 @@ final class Schedule {
     var isFlagged: Bool
     var isCompleted: Bool = false
     var priorityRaw: Int
+    var syncStatus: String = "synced"
 
     init(
         id: UUID = UUID(),
@@ -675,6 +676,7 @@ final class Schedule {
         self.isFlagged = isFlagged
         self.isCompleted = isCompleted
         self.priorityRaw = priority.rawValue
+        self.syncStatus = "synced"
     }
 
     var repeatPattern: RepeatPattern {
@@ -765,6 +767,7 @@ final class Schedule {
         return CGFloat(hour) + CGFloat(minute) / 60.0
     }
 }
+
 
 private enum ScheduleFormatters {
     static let date: DateFormatter = {

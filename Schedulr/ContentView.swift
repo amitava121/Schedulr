@@ -308,7 +308,9 @@ struct ContentView: View {
                                     data,
                                     includeSchedules: restoreSchedulesFromCloud,
                                     includeSettings: restoreSettingsFromCloud,
-                                    preferRemoteOnConflict: true
+                                    preferRemoteOnConflict: true,
+                                    forceApplySettingsFromBackup: true,
+                                    replaceLocalSchedulesWithBackup: true
                                 )
                                 showCloudRestoreStatus(result.userMessage)
                                 redirectAfterCloudRestoreFlowIfNeeded()
