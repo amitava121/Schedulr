@@ -2,10 +2,16 @@ import Foundation
 import SwiftData
 import FirebaseAuth
 @preconcurrency import FirebaseFirestore
+import OSLog
 
 @MainActor
 final class RealtimeSyncCoordinator {
     static let shared = RealtimeSyncCoordinator()
+
+    nonisolated private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "sync"
+    )
 
     private var listener: ListenerRegistration?
     private let db: Firestore
@@ -30,7 +36,7 @@ final class RealtimeSyncCoordinator {
                 guard let self else { return }
                 guard let snapshot else {
                     if let error {
-                        print("Realtime listener error: \(error.localizedDescription)")
+                        Self.logger.error("Realtime listener error: \(error.localizedDescription, privacy: .public)")
                     }
                     return
                 }
