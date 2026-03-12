@@ -135,7 +135,8 @@ enum EventKitExportService {
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
 
         do {
-            try ics.write(to: tempURL, atomically: true, encoding: .utf8)
+            guard let icsData = ics.data(using: .utf8) else { return nil }
+            try icsData.write(to: tempURL, options: [.atomic, .completeFileProtection])
             return tempURL
         } catch {
             print("Failed to write ICS file: \(error)")

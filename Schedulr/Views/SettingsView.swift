@@ -527,7 +527,7 @@ struct SettingsView: View {
     private func exportSchedulesAsJSON() {
         guard let data = viewModel.exportBackupData() else { return }
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("schedules-export.json")
-        try? data.write(to: tempURL)
+        try? data.write(to: tempURL, options: [.atomic, .completeFileProtection])
         exportURL = tempURL
         showingExportSheet = true
     }
@@ -535,7 +535,7 @@ struct SettingsView: View {
     private func exportSchedulesAsCSV() {
         guard let csvData = viewModel.exportAsCSV() else { return }
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("schedules-export.csv")
-        try? csvData.write(to: tempURL)
+        try? csvData.write(to: tempURL, options: [.atomic, .completeFileProtection])
         exportURL = tempURL
         showingExportSheet = true
     }
