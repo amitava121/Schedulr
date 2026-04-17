@@ -2171,15 +2171,50 @@ final class ScheduleViewModel {
         var grouped: [Date: [Schedule]] = [:]
         grouped.reserveCapacity(weekDates.count)
 
-        for weekDay in weekDates {
-            grouped[weekDay.startOfDay] = []
+        // ⚡ Bolt Optimization: Pre-compute week day start boundaries once
+        let weekDays = weekDates.map { $0.startOfDay }
+
+        for day in weekDays {
+            grouped[day] = []
         }
 
-        for schedule in visibleSchedules where !schedule.isSoftDeleted {
-            for weekDay in weekDates {
-                let day = weekDay.startOfDay
-                if occurs(schedule, on: day, calendar: calendar) {
-                    grouped[day, default: []].append(schedule)
+        if let firstWeekDay = weekDays.first, let lastWeekDay = weekDays.last {
+            // Filter visible schedules based on basic boundaries before doing complex occurrences.
+            // Using standard calendar here to avoid expensive self.scheduleCalendar inside loop.
+            let relevantSchedules = visibleSchedules.filter { schedule in
+                guard !schedule.isSoftDeleted else { return false }
+
+                let startDay = calendar.startOfDay(for: schedule.scheduledDate)
+
+                // Fast path: if it repeats but ended before the week begins, it won't occur
+                if schedule.repeatEndOption == .onDate, let endDate = schedule.repeatEndDate {
+                    let endDay = calendar.startOfDay(for: endDate)
+                    if endDay < firstWeekDay {
+                        return false
+                    }
+                }
+
+                // Fast path: if it starts after the week ends, it won't occur this week
+                if startDay > lastWeekDay {
+                    return false
+                }
+
+                // Fast path: if it doesn't repeat and starts before the week begins, it won't occur.
+                // (Assumes schedules are single-day occurrences starting on scheduledDate)
+                if schedule.repeatPattern == .never {
+                    if startDay < firstWeekDay {
+                        return false
+                    }
+                }
+
+                return true
+            }
+
+            for schedule in relevantSchedules {
+                for day in weekDays {
+                    if occurs(schedule, on: day, calendar: calendar) {
+                        grouped[day, default: []].append(schedule)
+                    }
                 }
             }
         }
@@ -2191,7 +2226,7 @@ final class ScheduleViewModel {
         }
 
         schedulesByDay = grouped
-        dayCacheAccessOrder = weekDates.map(\.startOfDay)
+        dayCacheAccessOrder = weekDays
     }
 
     private func markDayCacheAccess(for day: Date) {
