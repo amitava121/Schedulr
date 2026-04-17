@@ -1214,7 +1214,7 @@ struct FirebaseAccountView: View {
             return nil
         }
 
-        let hash = Insecure.MD5.hash(data: Data(email.utf8))
+        let hash = SHA256.hash(data: Data(email.utf8))
             .map { String(format: "%02hhx", $0) }
             .joined()
         return URL(string: "https://www.gravatar.com/avatar/\(hash)?d=404&s=160")
@@ -1391,7 +1391,10 @@ private struct CameraImagePicker: UIViewControllerRepresentable {
         return picker
     }
 
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {
+        // No updates needed for this static picker view controller.
+        // This empty implementation is required to satisfy the UIViewControllerRepresentable protocol.
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onPicked: onPicked)
@@ -1802,7 +1805,7 @@ final class SafeImageFlowManager: NSObject, PHPickerViewControllerDelegate {
         rootVC.view.backgroundColor = .clear
         window.rootViewController = rootVC
 
-        // CRITICAL FIX: Do NOT use makeKeyAndVisible().
+        // CRITICAL WORKAROUND: Do NOT use makeKeyAndVisible().
         // By only using .isHidden = false, this window floats above the app but NEVER steals the responder chain.
         // SwiftUI is completely blind to it, so Face ID will never crash your underlying sheet.
         window.windowLevel = .normal + 1

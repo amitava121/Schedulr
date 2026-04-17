@@ -527,7 +527,7 @@ struct SettingsView: View {
     private func exportSchedulesAsJSON() {
         guard let data = viewModel.exportBackupData() else { return }
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("schedules-export.json")
-        try? data.write(to: tempURL)
+        try? data.write(to: tempURL, options: [.atomic, .completeFileProtection])
         exportURL = tempURL
         showingExportSheet = true
     }
@@ -535,7 +535,7 @@ struct SettingsView: View {
     private func exportSchedulesAsCSV() {
         guard let csvData = viewModel.exportAsCSV() else { return }
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("schedules-export.csv")
-        try? csvData.write(to: tempURL)
+        try? csvData.write(to: tempURL, options: [.atomic, .completeFileProtection])
         exportURL = tempURL
         showingExportSheet = true
     }
@@ -842,7 +842,10 @@ struct ShareSheetView: UIViewControllerRepresentable {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
+        // No updates needed for the share sheet.
+        // This empty implementation is required to satisfy the UIViewControllerRepresentable protocol.
+    }
 }
 #else
 struct ShareSheetView: View {

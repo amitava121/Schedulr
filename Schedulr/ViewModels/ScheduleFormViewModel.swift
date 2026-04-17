@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SchedulrLogic
 
 @Observable
 final class ScheduleFormViewModel {
@@ -11,18 +12,6 @@ final class ScheduleFormViewModel {
         var id: String {
             switch self {
             case .none: return "none"
-            case .preset(let minutes): return "preset-\(minutes)"
-            case .custom: return "custom"
-            }
-        }
-    }
-
-    enum SnoozeChoice: Hashable, Identifiable {
-        case preset(Int)
-        case custom
-
-        var id: String {
-            switch self {
             case .preset(let minutes): return "preset-\(minutes)"
             case .custom: return "custom"
             }
@@ -171,30 +160,15 @@ final class ScheduleFormViewModel {
     }
 
     func snoozeDisplayName(for choice: SnoozeChoice) -> String {
-        switch choice {
-        case .preset(let minutes):
-            return "\(minutes) min"
-        case .custom:
-            return "Custom Time"
-        }
+        return SnoozeLogic.snoozeDisplayName(for: choice)
     }
 
     func isRepeatWeekdaySelected(_ weekday: Int) -> Bool {
-        repeatWeekdays.contains(weekday)
+        WeekdaySelectionLogic.isSelected(weekday, in: repeatWeekdays)
     }
 
     func toggleRepeatWeekday(_ weekday: Int) {
-        guard (1...7).contains(weekday) else { return }
-
-        if let index = repeatWeekdays.firstIndex(of: weekday) {
-            guard repeatWeekdays.count > 1 else { return }
-            repeatWeekdays.remove(at: index)
-        } else {
-            repeatWeekdays.append(weekday)
-            repeatWeekdays.sort()
-        }
-
-        repeatWeekdays = sanitizedRepeatWeekdays(repeatWeekdays)
+        repeatWeekdays = WeekdaySelectionLogic.toggle(weekday, in: repeatWeekdays)
     }
 
     func configure(with schedule: Schedule) {
@@ -383,8 +357,7 @@ final class ScheduleFormViewModel {
     }
 
     private func sanitizedRepeatWeekdays(_ weekdays: [Int]) -> [Int] {
-        let valid = Set(weekdays.filter { (1...7).contains($0) })
-        return valid.isEmpty ? Array(1...7) : valid.sorted()
+        WeekdaySelectionLogic.sanitize(weekdays)
     }
 
     private var resolvedRepeatEndOption: RepeatEndOption {

@@ -1,11 +1,16 @@
 import Foundation
 import EventKit
+import OSLog
 #if canImport(UIKit)
 import UIKit
 #endif
 
 /// Handles exporting schedules to system Calendar (EventKit) and .ics files.
 enum EventKitExportService {
+    nonisolated private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "EventKitExportService"
+    )
     private static let eventStore = EKEventStore()
 
     // MARK: - EventKit Export
@@ -51,7 +56,7 @@ enum EventKitExportService {
             try eventStore.save(event, span: .thisEvent)
             return true
         } catch {
-            print("Failed to save event to calendar: \(error)")
+            logger.error("Failed to save event to calendar: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }
@@ -135,10 +140,11 @@ enum EventKitExportService {
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
 
         do {
-            try ics.write(to: tempURL, atomically: true, encoding: .utf8)
+            guard let icsData = ics.data(using: .utf8) else { return nil }
+            try icsData.write(to: tempURL, options: [.atomic, .completeFileProtection])
             return tempURL
         } catch {
-            print("Failed to write ICS file: \(error)")
+            logger.error("Failed to write ICS file: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
