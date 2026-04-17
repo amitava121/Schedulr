@@ -45,6 +45,10 @@ final class ScheduleViewModel {
         subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
         category: "sync"
     )
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "ScheduleViewModel"
+    )
     private static let recurringCompletionStorageKey = "scheduleRecurringCompletion.v1"
     private static let widgetAppGroupID = "group.com.bittu.Schedulr"
     private static let widgetSnapshotKey = "widget.scheduleSnapshot.v1"
@@ -383,10 +387,12 @@ final class ScheduleViewModel {
         isLoading = true
         defer { isLoading = false }
         do {
+            let predicate = #Predicate<Schedule> { !$0.isSoftDeleted }
             let descriptor = FetchDescriptor<Schedule>(
+                predicate: predicate,
                 sortBy: [SortDescriptor(\.scheduledDate)]
             )
-            schedules = try modelContext.fetch(descriptor).filter { !$0.isSoftDeleted }
+            schedules = try modelContext.fetch(descriptor)
             resolveScheduleConflictsByLatestUpdate()
             pruneRecurringCompletionState()
             normalizeSchedules(immediate: true)
@@ -431,19 +437,90 @@ final class ScheduleViewModel {
         var summary: [Date: HeatmapDaySummary] = [:]
         summary.reserveCapacity(monthRange.count)
 
-        for day in monthRange {
-            guard let currentDay = calendar.date(byAdding: .day, value: day - 1, to: monthStart)?.startOfDay else {
+        let monthDays = monthRange.compactMap { day in
+            calendar.date(byAdding: .day, value: day - 1, to: monthStart)?.startOfDay
+        }
+
+        // ⚡ Bolt: Initialize summaries
+        var totals: [Date: Int] = [:]
+        var completeds: [Date: Int] = [:]
+        for day in monthDays {
+            totals[day] = 0
+            completeds[day] = 0
+        }
+
+        guard let firstMonthDay = monthDays.first, let lastMonthDay = monthDays.last else {
+            return [:]
+        }
+
+        // ⚡ Bolt: Iterate over visible schedules instead of iterating over days first
+        // Hoists expensive calendar initializations and avoids recalculating `startDay` 30+ times per schedule.
+        for schedule in visible {
+            guard !schedule.isSoftDeleted else { continue }
+
+            let scheduleCalendar = scheduleCalendar(for: schedule, base: calendar)
+            let startDay = scheduleCalendar.startOfDay(for: schedule.scheduledDate)
+
+            // Skip entirely if schedule starts after the month ends
+            if startDay > lastMonthDay {
                 continue
             }
 
-            let occurring = visible.filter { schedule in
-                occurs(schedule, on: currentDay, calendar: calendar)
+            // Skip entirely if schedule ends before the month starts
+            if schedule.repeatEndOption == .onDate,
+               let endDateRaw = schedule.repeatEndDate,
+               let endDate = Optional(scheduleCalendar.startOfDay(for: endDateRaw)),
+               endDate < firstMonthDay
+            {
+                continue
             }
-            let completed = occurring.filter { schedule in
-                isScheduleCompleted(schedule, on: currentDay)
-            }.count
 
-            summary[currentDay] = HeatmapDaySummary(total: occurring.count, completed: completed)
+            let excludedDays = schedule.excludedOccurrenceDates.map { scheduleCalendar.startOfDay(for: $0) }
+
+            // For afterCount, we can't easily skip without counting, but we can do normal `occurs` logic
+            for day in monthDays {
+                // Inline parts of `occurs` for performance using precalculated `startDay` and `excludedDays`
+                let targetDay = day // already start of day
+                guard targetDay >= startDay else { continue }
+
+                if excludedDays.contains(targetDay) {
+                    continue
+                }
+
+                if schedule.repeatEndOption == .onDate,
+                   let endDateRaw = schedule.repeatEndDate,
+                   let endDate = Optional(scheduleCalendar.startOfDay(for: endDateRaw)),
+                   targetDay > endDate
+                {
+                    continue
+                }
+
+                if schedule.repeatEndOption == .afterCount, schedule.repeatEndCount > 0 {
+                    let count = countOccurrences(of: schedule, before: targetDay, calendar: scheduleCalendar)
+                    if count >= schedule.repeatEndCount { continue }
+                }
+
+                let matches = matchesRepeatPattern(
+                    schedule,
+                    startDay: startDay,
+                    targetDay: targetDay,
+                    calendar: scheduleCalendar
+                )
+
+                if matches {
+                    totals[day, default: 0] += 1
+                    if isScheduleCompleted(schedule, on: day) {
+                        completeds[day, default: 0] += 1
+                    }
+                }
+            }
+        }
+
+        for day in monthDays {
+            summary[day] = HeatmapDaySummary(
+                total: totals[day] ?? 0,
+                completed: completeds[day] ?? 0
+            )
         }
 
         return summary
@@ -1539,7 +1616,7 @@ final class ScheduleViewModel {
         do {
             try modelContext.save()
         } catch {
-            print("Save error: \(error)")
+            Self.logger.error("Save error: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -1953,7 +2030,7 @@ final class ScheduleViewModel {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             guard let data = try? encoder.encode(payload) else { return }
-            try? data.write(to: fileURL, options: [.atomic])
+            try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
         }
     }
 
@@ -2165,15 +2242,50 @@ final class ScheduleViewModel {
         var grouped: [Date: [Schedule]] = [:]
         grouped.reserveCapacity(weekDates.count)
 
-        for weekDay in weekDates {
-            grouped[weekDay.startOfDay] = []
+        // ⚡ Bolt Optimization: Pre-compute week day start boundaries once
+        let weekDays = weekDates.map { $0.startOfDay }
+
+        for day in weekDays {
+            grouped[day] = []
         }
 
-        for schedule in visibleSchedules where !schedule.isSoftDeleted {
-            for weekDay in weekDates {
-                let day = weekDay.startOfDay
-                if occurs(schedule, on: day, calendar: calendar) {
-                    grouped[day, default: []].append(schedule)
+        if let firstWeekDay = weekDays.first, let lastWeekDay = weekDays.last {
+            // Filter visible schedules based on basic boundaries before doing complex occurrences.
+            // Using standard calendar here to avoid expensive self.scheduleCalendar inside loop.
+            let relevantSchedules = visibleSchedules.filter { schedule in
+                guard !schedule.isSoftDeleted else { return false }
+
+                let startDay = calendar.startOfDay(for: schedule.scheduledDate)
+
+                // Fast path: if it repeats but ended before the week begins, it won't occur
+                if schedule.repeatEndOption == .onDate, let endDate = schedule.repeatEndDate {
+                    let endDay = calendar.startOfDay(for: endDate)
+                    if endDay < firstWeekDay {
+                        return false
+                    }
+                }
+
+                // Fast path: if it starts after the week ends, it won't occur this week
+                if startDay > lastWeekDay {
+                    return false
+                }
+
+                // Fast path: if it doesn't repeat and starts before the week begins, it won't occur.
+                // (Assumes schedules are single-day occurrences starting on scheduledDate)
+                if schedule.repeatPattern == .never {
+                    if startDay < firstWeekDay {
+                        return false
+                    }
+                }
+
+                return true
+            }
+
+            for schedule in relevantSchedules {
+                for day in weekDays {
+                    if occurs(schedule, on: day, calendar: calendar) {
+                        grouped[day, default: []].append(schedule)
+                    }
                 }
             }
         }
@@ -2185,7 +2297,7 @@ final class ScheduleViewModel {
         }
 
         schedulesByDay = grouped
-        dayCacheAccessOrder = weekDates.map(\.startOfDay)
+        dayCacheAccessOrder = weekDays
     }
 
     private func markDayCacheAccess(for day: Date) {

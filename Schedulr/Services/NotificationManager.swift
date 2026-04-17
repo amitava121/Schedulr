@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import UserNotifications
 #if canImport(WidgetKit)
 import WidgetKit
@@ -11,6 +12,10 @@ import UIKit
 @Observable
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
+    nonisolated private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bittu.Schedulr",
+        category: "notifications"
+    )
     nonisolated private static let bundledAlarmSoundResource = "alarm_sound"
     nonisolated private static let bundledAlarmSoundExtension = "caf"
     nonisolated private static let bundledAlarmSoundName = UNNotificationSoundName("alarm_sound.caf")
@@ -82,7 +87,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         do {
             _ = try await center.requestAuthorization(options: basicOptions)
         } catch {
-            print("Basic notification authorization error: \(error)")
+            Self.logger.error("Basic notification authorization error: \(error.localizedDescription, privacy: .public)")
         }
 
         await refreshAuthorizationStatus()
@@ -103,7 +108,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             }
         } catch {
             // Expected failure when entitlement is absent — basic notifications still work.
-            print("Critical alert authorization unavailable: \(error)")
+            Self.logger.warning("Critical alert authorization unavailable: \(error.localizedDescription, privacy: .public)")
         }
 #endif
 
@@ -136,7 +141,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     do {
                         try await center.add(request)
                     } catch {
-                        print("Main notification scheduling error: \(error)")
+                        Self.logger.error("Main notification scheduling error: \(error.localizedDescription, privacy: .public)")
                     }
                 }
 
@@ -152,7 +157,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                         do {
                             try await center.add(request)
                         } catch {
-                            print("Early reminder scheduling error (\(reminderMinutes)m): \(error)")
+                            Self.logger.error("Early reminder scheduling error (\(reminderMinutes, privacy: .public)m): \(error.localizedDescription, privacy: .public)")
                         }
                     }
                 }
@@ -623,7 +628,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         var soundID: SystemSoundID = 0
         let status = AudioServicesCreateSystemSoundID(url as CFURL, &soundID)
         guard status == kAudioServicesNoError else {
-            print("Preview sound creation failed (\(status)) for \(name)")
+            Self.logger.error("Preview sound creation failed (\(status, privacy: .public)) for \(name, privacy: .public)")
             return nil
         }
 
@@ -649,7 +654,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         var soundID: SystemSoundID = 0
         let status = AudioServicesCreateSystemSoundID(url as CFURL, &soundID)
         guard status == kAudioServicesNoError else {
-            print("System sound creation failed (\(status)) for \(trimmed)")
+            Self.logger.error("System sound creation failed (\(status, privacy: .public)) for \(trimmed, privacy: .public)")
             return nil
         }
 
@@ -1971,7 +1976,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 do {
                     try await UNUserNotificationCenter.current().add(request)
                 } catch {
-                    print("\(context) error: \(error)")
+                    Self.logger.error("\(context, privacy: .public) error: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }
