@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SchedulrLogic
 
 @Observable
 final class ScheduleFormViewModel {
@@ -11,18 +12,6 @@ final class ScheduleFormViewModel {
         var id: String {
             switch self {
             case .none: return "none"
-            case .preset(let minutes): return "preset-\(minutes)"
-            case .custom: return "custom"
-            }
-        }
-    }
-
-    enum SnoozeChoice: Hashable, Identifiable {
-        case preset(Int)
-        case custom
-
-        var id: String {
-            switch self {
             case .preset(let minutes): return "preset-\(minutes)"
             case .custom: return "custom"
             }
@@ -171,12 +160,7 @@ final class ScheduleFormViewModel {
     }
 
     func snoozeDisplayName(for choice: SnoozeChoice) -> String {
-        switch choice {
-        case .preset(let minutes):
-            return "\(minutes) min"
-        case .custom:
-            return "Custom Time"
-        }
+        return SnoozeLogic.snoozeDisplayName(for: choice)
     }
 
     func isRepeatWeekdaySelected(_ weekday: Int) -> Bool {
