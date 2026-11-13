@@ -1,4 +1,5 @@
 import SwiftUI
+import SchedulrLogic
 
 struct ScheduleSearchView: View {
     @Bindable var viewModel: ScheduleViewModel

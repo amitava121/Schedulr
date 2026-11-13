@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SchedulrLogic
 
 enum AppTheme {
     static var accent: Color { AppSettings.shared.accentColor }

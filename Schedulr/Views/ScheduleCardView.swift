@@ -1,4 +1,5 @@
 import SwiftUI
+import SchedulrLogic
 
 struct ScheduleCardView: View {
     @Environment(\.colorScheme) private var colorScheme

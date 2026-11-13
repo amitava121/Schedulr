@@ -1,4 +1,5 @@
 import Foundation
+import SchedulrLogic
 
 /// Routes natural-language parsing through a cloud proxy first, then falls back
 /// to the local parser when network/proxy parsing is unavailable or too slow.

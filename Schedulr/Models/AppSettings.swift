@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SchedulrLogic
 
 extension Notification.Name {
     static let accentColorDidChange = Notification.Name("AppSettings.accentColorDidChange")

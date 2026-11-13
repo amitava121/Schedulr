@@ -1,10 +1,11 @@
 import Foundation
+import SchedulrLogic
 
-enum AlertDeliveryOption: String, Codable, CaseIterable, Identifiable {
-    case push
-    case alarm
+typealias AlertDeliveryOption = SchedulrLogic.AlertDeliveryOption
 
-    var id: String { rawValue }
+extension SchedulrLogic.AlertDeliveryOption: @retroactive CaseIterable, @retroactive Identifiable {
+    public static var allCases: [Self] { [.push, .alarm] }
+    public var id: String { rawValue }
 
     var displayName: String {
         switch self {

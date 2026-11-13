@@ -1,4 +1,5 @@
 import Foundation
+import SchedulrLogic
 #if canImport(NaturalLanguage)
 import NaturalLanguage
 #endif
