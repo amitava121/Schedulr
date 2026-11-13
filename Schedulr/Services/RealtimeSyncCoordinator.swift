@@ -19,9 +19,9 @@ final class RealtimeSyncCoordinator {
     private var activeContext: ModelContext?
 
     private init() {
-        let firestore = Firestore.firestore()
-        // Firestore persistent local cache is enabled by default on Apple platforms.
-        self.db = firestore
+        // Uses the configured FIRESTORE_DATABASE_ID ("schedulr"), not "(default)" —
+        // the latter does not exist in this project.
+        self.db = FirestoreDatabase.firestore()
     }
 
     func startListening(context: ModelContext) {
