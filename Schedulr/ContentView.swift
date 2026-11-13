@@ -220,6 +220,9 @@ struct ContentView: View {
                     firebaseService.registerBackupUpdateHandler { data in
                         handleRealtimeBackupUpdate(data)
                     }
+                    RealtimeSyncCoordinator.shared.onDidApplyRemoteChanges = { changed in
+                        viewModel.handleRemoteScheduleChanges(changed)
+                    }
                     viewModel.consumeWidgetCompletionRequests()
                     viewModel.prepareDefaultWeekLanding()
                     pasteboardManager.startMonitoring()

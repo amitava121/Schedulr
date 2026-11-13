@@ -17,6 +17,9 @@ final class RealtimeSyncCoordinator {
     private var listener: ListenerRegistration?
     private let db: Firestore
     private var activeContext: ModelContext?
+    /// Called on the main actor after remote documents are applied locally,
+    /// so the view layer can rebuild cached lists and reschedule notifications.
+    var onDidApplyRemoteChanges: (([Schedule]) -> Void)?
 
     private init() {
         // Uses the configured FIRESTORE_DATABASE_ID ("schedulr"), not "(default)" —
@@ -43,6 +46,7 @@ final class RealtimeSyncCoordinator {
                 }
 
                 Task { @MainActor in
+                    var appliedSchedules: [Schedule] = []
                     for diff in snapshot.documentChanges {
                         if diff.document.metadata.hasPendingWrites {
                             continue
@@ -53,13 +57,20 @@ final class RealtimeSyncCoordinator {
 
                         switch diff.type {
                         case .added, .modified:
-                            self.processIncomingCloudChange(data: data, documentID: documentID, context: context)
+                            if let schedule = self.processIncomingCloudChange(data: data, documentID: documentID, context: context) {
+                                appliedSchedules.append(schedule)
+                            }
                         case .removed:
-                            self.processIncomingCloudDeletion(documentID: documentID, context: context)
+                            if let schedule = self.processIncomingCloudDeletion(documentID: documentID, context: context) {
+                                appliedSchedules.append(schedule)
+                            }
                         }
                     }
 
                     try? context.save()
+                    if !appliedSchedules.isEmpty {
+                        self.onDidApplyRemoteChanges?(appliedSchedules)
+                    }
                 }
             }
     }
@@ -81,7 +92,7 @@ final class RealtimeSyncCoordinator {
 
         var payload = scheduleDictionary(from: schedule)
         payload["updatedAt"] = FieldValue.serverTimestamp()
-        payload["clientUpdatedAt"] = Timestamp(date: schedule.updatedAt)
+        payload["clientUpdatedAt"] = (FirestoreDatabase.timestamp(from: schedule.updatedAt) ?? NSNull()) as Any
 
         db.collection("users").document(uid).collection("schedules")
             .document(schedule.id.uuidString)
@@ -103,7 +114,7 @@ final class RealtimeSyncCoordinator {
 
         var payload = changedFields
         payload["updatedAt"] = FieldValue.serverTimestamp()
-        payload["clientUpdatedAt"] = Timestamp(date: schedule.updatedAt)
+        payload["clientUpdatedAt"] = (FirestoreDatabase.timestamp(from: schedule.updatedAt) ?? NSNull()) as Any
 
         db.collection("users").document(uid).collection("schedules")
             .document(schedule.id.uuidString)
@@ -132,7 +143,7 @@ final class RealtimeSyncCoordinator {
                 "isSoftDeleted": true,
                 "deletedAt": FieldValue.serverTimestamp(),
                 "updatedAt": FieldValue.serverTimestamp(),
-                "clientUpdatedAt": Timestamp(date: schedule.updatedAt)
+                "clientUpdatedAt": (FirestoreDatabase.timestamp(from: schedule.updatedAt) ?? NSNull()) as Any
             ], merge: true) { error in
                 DispatchQueue.main.async {
                     self.updateLocalSyncStatus(scheduleID: scheduleID, status: (error == nil) ? "synced" : "failed")
@@ -149,46 +160,52 @@ final class RealtimeSyncCoordinator {
         }
     }
 
-    private func processIncomingCloudChange(data: [String: Any], documentID: String, context: ModelContext) {
-        guard let scheduleID = UUID(uuidString: documentID) else { return }
+    @discardableResult
+    private func processIncomingCloudChange(data: [String: Any], documentID: String, context: ModelContext) -> Schedule? {
+        guard let scheduleID = UUID(uuidString: documentID) else { return nil }
 
         if let isSoftDeleted = boolValue(data["isSoftDeleted"]), isSoftDeleted {
-            processIncomingCloudDeletion(documentID: documentID, context: context)
-            return
+            return processIncomingCloudDeletion(documentID: documentID, context: context)
         }
 
         if timestampValue(data["deletedAt"]) != nil {
-            processIncomingCloudDeletion(documentID: documentID, context: context)
-            return
+            return processIncomingCloudDeletion(documentID: documentID, context: context)
         }
 
-        let cloudTimestamp = timestampValue(data["updatedAt"])
+        // Compare the writer's own edit time: migrated docs get a fresh server
+        // `updatedAt` at migration time, so it must not win over a newer local edit.
+        let cloudTimestamp = timestampValue(data["clientUpdatedAt"])
             ?? timestampValue(data["serverUpdatedAt"])
-            ?? timestampValue(data["clientUpdatedAt"])
+            ?? timestampValue(data["updatedAt"])
             ?? Date.distantPast
 
         let descriptor = FetchDescriptor<Schedule>(predicate: #Predicate { $0.id == scheduleID })
         let localMatch = try? context.fetch(descriptor).first
         let localTimestamp = localMatch?.updatedAt ?? Date.distantPast
 
-        guard cloudTimestamp > localTimestamp || localMatch == nil else { return }
+        guard cloudTimestamp > localTimestamp || localMatch == nil else { return nil }
 
         if let existing = localMatch {
             applyCloudData(data, to: existing, cloudTimestamp: cloudTimestamp)
+            return existing
         } else {
             let newSchedule = makeScheduleFromCloudData(data, id: scheduleID, cloudTimestamp: cloudTimestamp)
             context.insert(newSchedule)
+            return newSchedule
         }
     }
 
-    private func processIncomingCloudDeletion(documentID: String, context: ModelContext) {
-        guard let scheduleID = UUID(uuidString: documentID) else { return }
+    @discardableResult
+    private func processIncomingCloudDeletion(documentID: String, context: ModelContext) -> Schedule? {
+        guard let scheduleID = UUID(uuidString: documentID) else { return nil }
         let descriptor = FetchDescriptor<Schedule>(predicate: #Predicate { $0.id == scheduleID })
         if let localMatch = try? context.fetch(descriptor).first {
             localMatch.isSoftDeleted = true
             localMatch.deletedAt = localMatch.deletedAt ?? Date()
             localMatch.syncStatus = "synced"
+            return localMatch
         }
+        return nil
     }
 
     private func makeScheduleFromCloudData(_ data: [String: Any], id: UUID, cloudTimestamp: Date) -> Schedule {
@@ -208,15 +225,15 @@ final class RealtimeSyncCoordinator {
             urlString: stringValue(data["urlString"]),
             scheduledDate: timestampValue(data["scheduledDate"]) ?? Date(),
             isUrgent: boolValue(data["isUrgent"]) ?? false,
-            repeatPattern: RepeatPattern(rawValue: stringValue(data["repeatPatternRaw"]) ?? "") ?? .never,
+            repeatPattern: RepeatPattern(rawValue: stringValue(data["repeatPatternRaw"]) ?? stringValue(data["repeatPattern"]) ?? "") ?? .never,
             repeatWeekdays: intArrayValue(data["repeatWeekdays"]) ?? Array(1...7),
             repeatInterval: intValue(data["repeatInterval"]) ?? 1,
             repeatEndCount: intValue(data["repeatEndCount"]) ?? 0,
             excludedOccurrenceDates: timestampArrayValue(data["excludedOccurrenceDates"]),
-            repeatEndOption: RepeatEndOption(rawValue: stringValue(data["repeatEndOptionRaw"]) ?? "") ?? .never,
+            repeatEndOption: RepeatEndOption(rawValue: stringValue(data["repeatEndOptionRaw"]) ?? stringValue(data["repeatEndOption"]) ?? "") ?? .never,
             repeatEndDate: timestampValue(data["repeatEndDate"]),
-            alertDeliveryOption: AlertDeliveryOption(rawValue: stringValue(data["alertDeliveryRaw"]) ?? "") ?? .push,
-            alarmSoundOption: AlarmSoundOption(rawValue: stringValue(data["alarmSoundRaw"]) ?? "") ?? .defaultRingtone,
+            alertDeliveryOption: AlertDeliveryOption(rawValue: stringValue(data["alertDeliveryRaw"]) ?? stringValue(data["alertDeliveryOption"]) ?? "") ?? .push,
+            alarmSoundOption: AlarmSoundOption(rawValue: stringValue(data["alarmSoundRaw"]) ?? stringValue(data["alarmSoundOption"]) ?? "") ?? .defaultRingtone,
             alarmSnoozeEnabled: boolValue(data["alarmSnoozeEnabled"]) ?? true,
             alarmSnoozeMinutes: intValue(data["alarmSnoozeMinutes"]) ?? 10,
             earlyReminderMinutes: intValue(data["earlyReminderMinutes"]),
@@ -226,7 +243,7 @@ final class RealtimeSyncCoordinator {
             tags: stringArrayValue(data["tags"]) ?? [],
             isFlagged: boolValue(data["isFlagged"]) ?? false,
             isCompleted: boolValue(data["isCompleted"]) ?? false,
-            priority: SchedulePriority(rawValue: intValue(data["priorityRaw"]) ?? 0) ?? .none
+            priority: SchedulePriority(rawValue: intValue(data["priorityRaw"]) ?? intValue(data["priority"]) ?? 0) ?? .none
         )
         schedule.syncStatus = "synced"
         return schedule
@@ -246,15 +263,15 @@ final class RealtimeSyncCoordinator {
         schedule.urlString = stringValue(data["urlString"])
         schedule.scheduledDate = timestampValue(data["scheduledDate"]) ?? schedule.scheduledDate
         schedule.isUrgent = boolValue(data["isUrgent"]) ?? schedule.isUrgent
-        schedule.repeatPatternRaw = stringValue(data["repeatPatternRaw"]) ?? schedule.repeatPatternRaw
+        schedule.repeatPatternRaw = stringValue(data["repeatPatternRaw"]) ?? stringValue(data["repeatPattern"]) ?? schedule.repeatPatternRaw
         schedule.repeatWeekdays = intArrayValue(data["repeatWeekdays"]) ?? schedule.repeatWeekdays
         schedule.repeatInterval = intValue(data["repeatInterval"]) ?? schedule.repeatInterval
         schedule.repeatEndCount = intValue(data["repeatEndCount"]) ?? schedule.repeatEndCount
         schedule.excludedOccurrenceDates = timestampArrayValue(data["excludedOccurrenceDates"])
-        schedule.repeatEndOptionRaw = stringValue(data["repeatEndOptionRaw"]) ?? schedule.repeatEndOptionRaw
+        schedule.repeatEndOptionRaw = stringValue(data["repeatEndOptionRaw"]) ?? stringValue(data["repeatEndOption"]) ?? schedule.repeatEndOptionRaw
         schedule.repeatEndDate = timestampValue(data["repeatEndDate"])
-        schedule.alertDeliveryRaw = stringValue(data["alertDeliveryRaw"]) ?? schedule.alertDeliveryRaw
-        schedule.alarmSoundRaw = stringValue(data["alarmSoundRaw"]) ?? schedule.alarmSoundRaw
+        schedule.alertDeliveryRaw = stringValue(data["alertDeliveryRaw"]) ?? stringValue(data["alertDeliveryOption"]) ?? schedule.alertDeliveryRaw
+        schedule.alarmSoundRaw = stringValue(data["alarmSoundRaw"]) ?? stringValue(data["alarmSoundOption"]) ?? schedule.alarmSoundRaw
         schedule.alarmSnoozeEnabled = boolValue(data["alarmSnoozeEnabled"]) ?? schedule.alarmSnoozeEnabled
         schedule.alarmSnoozeMinutes = intValue(data["alarmSnoozeMinutes"]) ?? schedule.alarmSnoozeMinutes
         schedule.earlyReminderMinutes = intValue(data["earlyReminderMinutes"])
@@ -264,16 +281,16 @@ final class RealtimeSyncCoordinator {
         schedule.tags = stringArrayValue(data["tags"]) ?? schedule.tags
         schedule.isFlagged = boolValue(data["isFlagged"]) ?? schedule.isFlagged
         schedule.isCompleted = boolValue(data["isCompleted"]) ?? schedule.isCompleted
-        schedule.priorityRaw = intValue(data["priorityRaw"]) ?? schedule.priorityRaw
+        schedule.priorityRaw = intValue(data["priorityRaw"]) ?? intValue(data["priority"]) ?? schedule.priorityRaw
         schedule.syncStatus = "synced"
     }
 
     private func scheduleDictionary(from schedule: Schedule) -> [String: Any] {
         [
             "scheduleID": schedule.id.uuidString,
-            "createdAt": Timestamp(date: schedule.createdAt),
-            "updatedAt": Timestamp(date: schedule.updatedAt),
-            "deletedAt": schedule.deletedAt.map { Timestamp(date: $0) } as Any,
+            "createdAt": (FirestoreDatabase.timestamp(from: schedule.createdAt) ?? NSNull()) as Any,
+            "updatedAt": (FirestoreDatabase.timestamp(from: schedule.updatedAt) ?? NSNull()) as Any,
+            "deletedAt": schedule.deletedAt.map { FirestoreDatabase.timestamp(from: $0) ?? NSNull() } as Any,
             "isSoftDeleted": schedule.isSoftDeleted,
             "lastModifiedDeviceID": schedule.lastModifiedDeviceID,
             "syncVersion": schedule.syncVersion,
@@ -282,15 +299,15 @@ final class RealtimeSyncCoordinator {
             "title": schedule.title,
             "notes": schedule.notes as Any,
             "urlString": schedule.urlString as Any,
-            "scheduledDate": Timestamp(date: schedule.scheduledDate),
+            "scheduledDate": (FirestoreDatabase.timestamp(from: schedule.scheduledDate) ?? NSNull()) as Any,
             "isUrgent": schedule.isUrgent,
             "repeatPatternRaw": schedule.repeatPatternRaw,
             "repeatWeekdays": schedule.repeatWeekdays,
             "repeatInterval": schedule.repeatInterval,
             "repeatEndCount": schedule.repeatEndCount,
-            "excludedOccurrenceDates": schedule.excludedOccurrenceDates.map { Timestamp(date: $0) },
+            "excludedOccurrenceDates": schedule.excludedOccurrenceDates.compactMap { FirestoreDatabase.timestamp(from: $0) },
             "repeatEndOptionRaw": schedule.repeatEndOptionRaw,
-            "repeatEndDate": schedule.repeatEndDate.map { Timestamp(date: $0) } as Any,
+            "repeatEndDate": schedule.repeatEndDate.map { FirestoreDatabase.timestamp(from: $0) ?? NSNull() } as Any,
             "alertDeliveryRaw": schedule.alertDeliveryRaw,
             "alarmSoundRaw": schedule.alarmSoundRaw,
             "alarmSnoozeEnabled": schedule.alarmSnoozeEnabled,
