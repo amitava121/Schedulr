@@ -117,10 +117,12 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             // AlarmKit has its own authorization; register system alarms even
             // when notification access is denied.
             if schedule.alertDeliveryOption == .alarm {
+                let nextFireDate = nextAlarmFireDate(for: schedule)
                 await AlarmKitManager.shared.updateAlarm(
                     for: schedule,
-                    alarmSchedule: alarmKitSchedule(for: schedule),
-                    nextFireDate: nextAlarmFireDate(for: schedule)
+                    alarmSchedule: alarmKitSchedule(for: schedule)
+                        ?? nextFireDate.map { .fixed($0) },
+                    nextFireDate: nextFireDate
                 )
             }
 #endif
@@ -228,7 +230,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 #endif
 
-    func cancelNotification(for schedule: Schedule) {
+    func cancelNotification(for schedule: Schedule, includingAlarm: Bool = true) {
         let center = UNUserNotificationCenter.current()
         let schedulePrefix = schedule.id.uuidString
         let fallbackIdentifiers = Set(allIdentifiers(for: schedule.id) + Self.allIdentifiersStatic(for: schedule.id))
@@ -252,12 +254,16 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
 
 #if os(iOS)
-        Task { await AlarmKitManager.shared.cancelAlarm(for: schedule.id) }
+        if includingAlarm {
+            Task { await AlarmKitManager.shared.cancelAlarm(for: schedule.id) }
+        }
 #endif
     }
 
     func updateNotification(for schedule: Schedule) {
-        cancelNotification(for: schedule)
+        // scheduleNotification reconciles the AlarmKit alarm in place; cancelling
+        // it here races that Task and can drop the alarm, or churns it every launch.
+        cancelNotification(for: schedule, includingAlarm: schedule.alertDeliveryOption != .alarm)
         scheduleNotification(for: schedule)
     }
 

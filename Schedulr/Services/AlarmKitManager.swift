@@ -57,7 +57,10 @@ final class AlarmKitManager {
             // Never touch an alarm that is ringing, counting down to its next
             // ring (snooze), or paused — only replace a still-pending one.
             guard existing.state == .scheduled else { return }
-            if existing.schedule == desired { return }
+            if Self.isSameSchedule(existing.schedule, desired) { return }
+            Self.logger.debug(
+                "AlarmKit replacing \(id.uuidString, privacy: .public): existing=\(String(describing: existing.schedule), privacy: .public) desired=\(String(describing: desired), privacy: .public)"
+            )
             try? manager.cancel(id: id)
         }
 
@@ -109,6 +112,27 @@ final class AlarmKitManager {
         guard let existing = currentAlarm(id: id),
               existing.state == .scheduled else { return }
         try? AlarmManager.shared.cancel(id: id)
+    }
+
+    /// Semantic equality: the daemon may hand back weekdays in a different
+    /// order than we registered them, and fixed dates only matter to the minute.
+    private static func isSameSchedule(_ existing: Alarm.Schedule?, _ desired: Alarm.Schedule) -> Bool {
+        switch (existing, desired) {
+        case (.fixed(let lhs)?, .fixed(let rhs)):
+            return Int(lhs.timeIntervalSince1970) / 60 == Int(rhs.timeIntervalSince1970) / 60
+        case (.relative(let lhs)?, .relative(let rhs)):
+            guard lhs.time == rhs.time else { return false }
+            switch (lhs.repeats, rhs.repeats) {
+            case (.never, .never):
+                return true
+            case (.weekly(let lhsDays), .weekly(let rhsDays)):
+                return Set(lhsDays) == Set(rhsDays)
+            default:
+                return false
+            }
+        default:
+            return false
+        }
     }
 
     private func currentAlarm(id: UUID) -> Alarm? {
