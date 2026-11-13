@@ -121,6 +121,36 @@ final class SyncConflictResolverTests: XCTestCase {
             XCTFail("Expected keepRemote for newer remote with different identity")
         }
     }
+
+    func testResolveBlobRestoreConflictKeepsLocalWhenNewerWithDifferentIdentity() {
+        let now = Date()
+        let local = makeSchedule(title: "One", scheduledDate: now.addingTimeInterval(3600), updatedAt: now.addingTimeInterval(120))
+        let remote = makeSchedule(title: "Two", scheduledDate: now, updatedAt: now)
+
+        let action = SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: local, remoteSchedule: remote)
+
+        switch action {
+        case .keepLocal:
+            XCTAssertTrue(true)
+        default:
+            XCTFail("Expected keepLocal for newer local with different identity")
+        }
+    }
+
+    func testResolveBlobRestoreConflictKeepsLocalWhenTimestampsEqualWithDifferentIdentity() {
+        let now = Date()
+        let local = makeSchedule(title: "One", scheduledDate: now.addingTimeInterval(3600), updatedAt: now)
+        let remote = makeSchedule(title: "Two", scheduledDate: now, updatedAt: now)
+
+        let action = SyncConflictResolver.resolveBlobRestoreConflict(localSchedule: local, remoteSchedule: remote)
+
+        switch action {
+        case .keepLocal:
+            XCTAssertTrue(true)
+        default:
+            XCTFail("Expected keepLocal for equal timestamps with different identity")
+        }
+    }
 }
 
 final class SettingsSyncLogicTests: XCTestCase {
