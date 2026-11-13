@@ -37,6 +37,8 @@
 	<true/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAlarmKitUsageDescription</key>
+	<string>Schedulr schedules real alarms that can ring through Silent mode and Focus so you never miss a reminder.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Schedulr uses the camera so you can capture and set a profile photo.</string>
 	<key>NSSupportsLiveActivities</key>

@@ -510,9 +510,6 @@ enum AlarmSoundOption: String, Codable, CaseIterable, Identifiable {
         bundledSoundFileName ?? fallbackBundledSoundFileName
     }
 
-    var usesCriticalAlert: Bool {
-        self == .critical
-    }
 
     private var ringtoneLookupCandidates: [String] {
         let seed = [

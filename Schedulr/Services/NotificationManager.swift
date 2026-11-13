@@ -92,27 +92,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
 
         await refreshAuthorizationStatus()
-
-#if os(iOS)
-        // Step 2: Separately try to upgrade to critical alerts.
-        // Critical alerts require the com.apple.developer.usernotifications.critical-alerts
-        // entitlement. Without it this call throws — but basic permissions are already granted.
-        do {
-            let settings = await center.notificationSettings()
-            if settings.criticalAlertSetting != .enabled {
-                var options: UNAuthorizationOptions = [.alert, .sound, .criticalAlert]
-                if AppSettings.shared.notificationBadgeEnabled {
-                    options.insert(.badge)
-                }
-                _ = try await center.requestAuthorization(options: options)
-                await refreshAuthorizationStatus()
-            }
-        } catch {
-            // Expected failure when entitlement is absent — basic notifications still work.
-            Self.logger.warning("Critical alert authorization unavailable: \(error.localizedDescription, privacy: .public)")
-        }
-#endif
-
     }
 
     func scheduleNotification(for schedule: Schedule) {
@@ -163,7 +142,27 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     }
                 }
             }
+
+#if os(iOS)
+            if schedule.alertDeliveryOption == .alarm {
+                await AlarmKitManager.shared.updateAlarm(
+                    for: schedule,
+                    nextFireDate: nextAlarmFireDate(for: schedule)
+                )
+            }
+#endif
         }
+    }
+
+    /// Next date the alarm should actually fire; nil when nothing is pending.
+    private func nextAlarmFireDate(for schedule: Schedule, now: Date = Date()) -> Date? {
+        if schedule.repeatPattern == .never {
+            return schedule.scheduledDate > now ? schedule.scheduledDate : nil
+        }
+        let horizon = Calendar.current.date(byAdding: .year, value: 1, to: now)
+            ?? schedule.scheduledDate
+        return recurringOccurrences(for: schedule, through: horizon)
+            .first(where: { $0 > now })
     }
 
     func cancelNotification(for schedule: Schedule) {
@@ -188,6 +187,10 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             guard !identifiersToRemove.isEmpty else { return }
             center.removeDeliveredNotifications(withIdentifiers: identifiersToRemove)
         }
+
+#if os(iOS)
+        Task { await AlarmKitManager.shared.cancelAlarm(for: schedule.id) }
+#endif
     }
 
     func updateNotification(for schedule: Schedule) {
@@ -510,11 +513,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
 #if os(iOS)
     private func setBadgeCount(_ count: Int) {
-        if #available(iOS 17.0, *) {
-            UNUserNotificationCenter.current().setBadgeCount(count, withCompletionHandler: nil)
-        } else {
-            UIApplication.shared.applicationIconBadgeNumber = count
-        }
+        UNUserNotificationCenter.current().setBadgeCount(count, withCompletionHandler: nil)
     }
 #endif
 
@@ -1299,7 +1298,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = notificationSound(for: schedule, settings: settings, kind: kind)
+        content.sound = notificationSound(for: schedule, kind: kind)
         if AppSettings.shared.notificationBadgeEnabled {
             content.badge = NSNumber(value: 1)
         }
@@ -1335,11 +1334,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     }
                     content.relevanceScore = schedule.priority == .high ? 1.0 : 0.9
                 case .alarm:
-                    if settings.criticalAlertSetting == .enabled {
-                        content.interruptionLevel = .critical
-                    } else {
-                        content.interruptionLevel = .timeSensitive
-                    }
+                    content.interruptionLevel = .timeSensitive
                     content.relevanceScore = 1.0
                 }
             }
@@ -1364,7 +1359,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// Foreground delivery also uses system notification sound presentation.
     private func notificationSound(
         for schedule: Schedule,
-        settings: UNNotificationSettings,
         kind: ScheduleNotificationKind
     ) -> UNNotificationSound? {
         // Early reminder should never use the selected alarm ringtone.
@@ -1376,12 +1370,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         guard option == .alarm else { return .default }
 
         let soundOption = schedule.alarmSoundOption
-
-#if os(iOS)
-        if settings.criticalAlertSetting == .enabled, soundOption.usesCriticalAlert {
-            return .defaultCritical
-        }
-#endif
 
         return Self.bundledNotificationSound(fileName: soundOption.rawValue)
     }

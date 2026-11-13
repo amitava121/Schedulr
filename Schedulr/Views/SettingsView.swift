@@ -385,14 +385,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack {
-                Text("Critical Alerts")
-                Spacer()
-                Text(criticalAlertStatusText)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("Critical alerts can play alarm-style reminders even during Focus and mute modes when entitlement and user permission are both granted.")
+            Text("Alarms use AlarmKit to ring through Silent mode and Focus, and appear on the Lock Screen, Dynamic Island, and Apple Watch.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -409,7 +402,7 @@ struct SettingsView: View {
             }
 #endif
         } header: {
-            Text("Critical Alerts")
+            Text("Permissions")
         }
     }
 
@@ -493,19 +486,6 @@ struct SettingsView: View {
         }
     }
 
-    private var criticalAlertStatusText: String {
-        guard let status = notificationSettings?.criticalAlertSetting else { return "Unknown" }
-        switch status {
-        case .enabled:
-            return "Enabled"
-        case .disabled:
-            return "Disabled"
-        case .notSupported:
-            return "Not Supported"
-        @unknown default:
-            return "Unknown"
-        }
-    }
 
     private func refreshNotificationPermissionSnapshot() {
         Task {
