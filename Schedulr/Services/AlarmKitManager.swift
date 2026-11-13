@@ -34,25 +34,38 @@ final class AlarmKitManager {
     private init() {}
 
     /// Reconciles the system alarm for a schedule: creates/updates it when the
-    /// schedule should ring, removes it when it shouldn't. `nextFireDate` comes
-    /// from NotificationManager's recurrence logic — pass nil to cancel.
-    func updateAlarm(for schedule: Schedule, nextFireDate: Date?) async {
+    /// schedule should ring, removes it when it shouldn't.
+    /// `alarmSchedule` is the AlarmKit-native schedule (`.relative` with
+    /// recurrence when the repeat pattern maps, `.fixed` otherwise); nil means
+    /// cancel. `nextFireDate` is used only to sanity-check that the alarm is
+    /// still pending.
+    func updateAlarm(
+        for schedule: Schedule,
+        alarmSchedule: Alarm.Schedule?,
+        nextFireDate: Date?
+    ) async {
         let manager = AlarmManager.shared
         let id = schedule.id
 
-        guard let fireDate = nextFireDate, fireDate > Date() else {
+        guard let desired = alarmSchedule,
+              let fireDate = nextFireDate, fireDate > Date() else {
             cancelAlarm(for: id)
             return
         }
 
+        let fingerprint = configFingerprint(for: schedule)
         if let existing = currentAlarm(id: id) {
-            // Never cancel an alarm that is currently ringing.
-            if existing.state == .alerting { return }
-            // Same fire minute already registered → nothing to do.
-            if case .fixed(let existingDate) = existing.schedule,
-               Int(existingDate.timeIntervalSince1970) / 60 == Int(fireDate.timeIntervalSince1970) / 60 {
-                return
-            }
+            // Never touch an alarm that is ringing, counting down to its next
+            // ring (snooze), or paused — only replace a still-pending one.
+            guard existing.state == .scheduled else { return }
+            // The daemon can't report back presentation/sound/snooze config,
+            // so the last-applied fingerprint decides whether an edit that
+            // kept the same alarm time also needs a re-registration.
+            if Self.isSameSchedule(existing.schedule, desired),
+               storedFingerprint(for: id) == fingerprint { return }
+            Self.logger.debug(
+                "AlarmKit replacing \(id.uuidString, privacy: .public): existing=\(String(describing: existing.schedule), privacy: .public) desired=\(String(describing: desired), privacy: .public)"
+            )
             try? manager.cancel(id: id)
         }
 
@@ -73,15 +86,19 @@ final class AlarmKitManager {
                 postAlert: TimeInterval(max(1, schedule.alarmSnoozeMinutes) * 60)
             )
             : nil
+        let sound: AlertConfiguration.AlertSound = schedule.alarmSoundOption
+            .bestAvailableBundledSoundFileName
+            .map { .named($0) } ?? .default
         let configuration = AlarmManager.AlarmConfiguration<SchedulrAlarmMetadata>(
             countdownDuration: countdown,
-            schedule: .fixed(fireDate),
+            schedule: desired,
             attributes: attributes,
-            sound: .default
+            sound: sound
         )
 
         do {
             _ = try await manager.schedule(id: id, configuration: configuration)
+            UserDefaults.standard.set(fingerprint, forKey: Self.fingerprintKey(for: id))
             Self.logger.info(
                 "AlarmKit alarm scheduled for \(id.uuidString, privacy: .public) at \(fireDate, privacy: .public)"
             )
@@ -92,14 +109,54 @@ final class AlarmKitManager {
         }
     }
 
-    /// Cancels the registered system alarm unless it is currently ringing —
-    /// killing a ringing alarm would silence it without the user stopping it.
-    /// Returns early when nothing is registered so push-only schedules don't
-    /// emit `Alarm does not exist` noise in mobiletimerd.
+    /// Cancels a still-pending system alarm. Alarms that are ringing, in
+    /// snooze countdown, or paused are left alone — cancelling those would
+    /// silence an alarm the user is actively expecting. Returns early when
+    /// nothing is registered so push-only schedules don't emit
+    /// `Alarm does not exist` noise in mobiletimerd.
     func cancelAlarm(for id: UUID) {
-        guard let existing = currentAlarm(id: id) else { return }
-        if existing.state == .alerting { return }
+        UserDefaults.standard.removeObject(forKey: Self.fingerprintKey(for: id))
+        guard let existing = currentAlarm(id: id),
+              existing.state == .scheduled else { return }
         try? AlarmManager.shared.cancel(id: id)
+    }
+
+    /// Semantic equality: the daemon may hand back weekdays in a different
+    /// order than we registered them, and fixed dates only matter to the minute.
+    private static func isSameSchedule(_ existing: Alarm.Schedule?, _ desired: Alarm.Schedule) -> Bool {
+        switch (existing, desired) {
+        case (.fixed(let lhs)?, .fixed(let rhs)):
+            return Int(lhs.timeIntervalSince1970) / 60 == Int(rhs.timeIntervalSince1970) / 60
+        case (.relative(let lhs)?, .relative(let rhs)):
+            guard lhs.time == rhs.time else { return false }
+            switch (lhs.repeats, rhs.repeats) {
+            case (.never, .never):
+                return true
+            case (.weekly(let lhsDays), .weekly(let rhsDays)):
+                return Set(lhsDays) == Set(rhsDays)
+            default:
+                return false
+            }
+        default:
+            return false
+        }
+    }
+
+    /// Everything `isSameSchedule` can't see: the presentation and delivery
+    /// options (title, snooze button/duration, sound) that AlarmKit never
+    /// reports back. Persisted so a config-only edit still re-registers the
+    /// alarm, including across launches.
+    private func configFingerprint(for schedule: Schedule) -> String {
+        let sound = schedule.alarmSoundOption.bestAvailableBundledSoundFileName ?? "default"
+        return "\(schedule.title)|snooze=\(schedule.alarmSnoozeEnabled)|mins=\(schedule.alarmSnoozeMinutes)|sound=\(sound)"
+    }
+
+    private static func fingerprintKey(for id: UUID) -> String {
+        "alarmkit.fingerprint.\(id.uuidString)"
+    }
+
+    private func storedFingerprint(for id: UUID) -> String? {
+        UserDefaults.standard.string(forKey: Self.fingerprintKey(for: id))
     }
 
     private func currentAlarm(id: UUID) -> Alarm? {

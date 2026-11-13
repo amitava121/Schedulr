@@ -6,6 +6,7 @@ import SchedulrLogic
 import WidgetKit
 #endif
 #if os(iOS)
+import AlarmKit
 import AudioToolbox
 import UIKit
 #endif
@@ -107,12 +108,26 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 isAuthorized = authorized
             }
 
-            guard settings.authorizationStatus != .denied else { return }
-
             if shouldSuppressForFocus {
                 cancelNotification(for: schedule)
                 return
             }
+
+#if os(iOS)
+            // AlarmKit has its own authorization; register system alarms even
+            // when notification access is denied.
+            if schedule.alertDeliveryOption == .alarm {
+                let nextFireDate = nextAlarmFireDate(for: schedule)
+                await AlarmKitManager.shared.updateAlarm(
+                    for: schedule,
+                    alarmSchedule: alarmKitSchedule(for: schedule, nextFireDate: nextFireDate)
+                        ?? nextFireDate.map { .fixed($0) },
+                    nextFireDate: nextFireDate
+                )
+            }
+#endif
+
+            guard settings.authorizationStatus != .denied else { return }
 
             if authorized || settings.authorizationStatus == .notDetermined {
                 // Always schedule local notifications — they are the reliable backbone.
@@ -142,30 +157,121 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     }
                 }
             }
+        }
+    }
+
+    /// Next date the alarm should actually fire; nil when nothing is pending
+    /// or the repeat series has already ended.
+    private func nextAlarmFireDate(for schedule: Schedule, now: Date = Date()) -> Date? {
+        let next: Date?
+        if schedule.repeatPattern == .never {
+            next = schedule.scheduledDate > now ? schedule.scheduledDate : nil
+        } else {
+            let horizon = Calendar.current.date(byAdding: .year, value: 1, to: now)
+                ?? schedule.scheduledDate
+            next = recurringOccurrences(for: schedule, through: horizon, after: now).first
+        }
+        guard let next else { return nil }
+        if let boundary = repeatEndBoundary(for: schedule), next > boundary {
+            return nil
+        }
+        return next
+    }
 
 #if os(iOS)
-            if schedule.alertDeliveryOption == .alarm {
-                await AlarmKitManager.shared.updateAlarm(
-                    for: schedule,
-                    nextFireDate: nextAlarmFireDate(for: schedule)
-                )
+    /// AlarmKit-native schedule for repeat patterns it can express directly;
+    /// nil falls back to a single fixed alarm at the next occurrence for
+    /// patterns AlarmKit can't represent (interval and monthly rules).
+    private func alarmKitSchedule(for schedule: Schedule, nextFireDate: Date?, now: Date = Date()) -> Alarm.Schedule? {
+        let calendar = Calendar.current
+        let time = Alarm.Schedule.Relative.Time(
+            hour: calendar.component(.hour, from: schedule.scheduledDate),
+            minute: calendar.component(.minute, from: schedule.scheduledDate)
+        )
+        func localeWeekdays(_ calendarWeekdays: [Int]) -> [Locale.Weekday] {
+            calendarWeekdays.compactMap {
+                switch $0 {
+                case 1: return .sunday
+                case 2: return .monday
+                case 3: return .tuesday
+                case 4: return .wednesday
+                case 5: return .thursday
+                case 6: return .friday
+                case 7: return .saturday
+                default: return nil
+                }
             }
+        }
+
+        // AlarmKit's `.relative` recurrence has no start or end bound: it rings
+        // on every matching (weekday, time) slot forever. It is only safe when
+        // the series is open-ended and the recurrence's next slot coincides
+        // with the schedule's real next occurrence — otherwise a finite series
+        // would ring past its end, or a future-starting series would ring
+        // early. In those cases a one-off fixed alarm is registered instead and
+        // each reconcile re-evaluates (converging to `.relative` once slots
+        // line up). `nextFireDate` already returns nil past the end boundary.
+        func boundedWeeklyRecurrence(_ calendarWeekdays: [Int]) -> Alarm.Schedule? {
+            guard let nextFireDate,
+                  repeatEndBoundary(for: schedule) == nil,
+                  let slot = earliestRecurrenceSlot(
+                      weekdays: Set(calendarWeekdays), time: time, after: now
+                  ),
+                  Int(slot.timeIntervalSince1970) / 60 >= Int(nextFireDate.timeIntervalSince1970) / 60
+            else {
+                return nil
+            }
+            return .relative(.init(
+                time: time,
+                repeats: .weekly(localeWeekdays(calendarWeekdays))
+            ))
+        }
+
+        switch schedule.repeatPattern {
+        case .never:
+            return .fixed(schedule.scheduledDate)
+        case .daily:
+            // `.daily` honors repeatWeekdays the same way notifications do.
+            return boundedWeeklyRecurrence(normalizedWeekdays(schedule.repeatWeekdays))
+        case .weekdays:
+            return boundedWeeklyRecurrence([2, 3, 4, 5, 6])
+        case .weekly:
+            return boundedWeeklyRecurrence([calendar.component(.weekday, from: schedule.scheduledDate)])
+        case .customWeekdays:
+            let days = schedule.repeatWeekdays.isEmpty
+                ? [calendar.component(.weekday, from: schedule.scheduledDate)]
+                : schedule.repeatWeekdays
+            return boundedWeeklyRecurrence(days)
+        case .biweekly, .monthly, .yearly, .everyNDays, .everyNWeeks, .everyNMonths:
+            return nil
+        }
+    }
+
+    /// Earliest upcoming (weekday, hour:minute) slot a weekly AlarmKit
+    /// recurrence would fire on, or nil within the next 8 days.
+    private func earliestRecurrenceSlot(
+        weekdays: Set<Int>,
+        time: Alarm.Schedule.Relative.Time,
+        after now: Date
+    ) -> Date? {
+        let calendar = Calendar.current
+        for offset in 0..<8 {
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+            var comps = calendar.dateComponents([.year, .month, .day], from: day)
+            comps.hour = time.hour
+            comps.minute = time.minute
+            comps.second = 0
+            guard let candidate = calendar.date(from: comps),
+                  candidate > now,
+                  weekdays.contains(calendar.component(.weekday, from: candidate))
+            else { continue }
+            return candidate
+        }
+        return nil
+    }
 #endif
-        }
-    }
 
-    /// Next date the alarm should actually fire; nil when nothing is pending.
-    private func nextAlarmFireDate(for schedule: Schedule, now: Date = Date()) -> Date? {
-        if schedule.repeatPattern == .never {
-            return schedule.scheduledDate > now ? schedule.scheduledDate : nil
-        }
-        let horizon = Calendar.current.date(byAdding: .year, value: 1, to: now)
-            ?? schedule.scheduledDate
-        return recurringOccurrences(for: schedule, through: horizon)
-            .first(where: { $0 > now })
-    }
-
-    func cancelNotification(for schedule: Schedule) {
+    func cancelNotification(for schedule: Schedule, includingAlarm: Bool = true) {
         let center = UNUserNotificationCenter.current()
         let schedulePrefix = schedule.id.uuidString
         let fallbackIdentifiers = Set(allIdentifiers(for: schedule.id) + Self.allIdentifiersStatic(for: schedule.id))
@@ -189,12 +295,16 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
 
 #if os(iOS)
-        Task { await AlarmKitManager.shared.cancelAlarm(for: schedule.id) }
+        if includingAlarm {
+            Task { await AlarmKitManager.shared.cancelAlarm(for: schedule.id) }
+        }
 #endif
     }
 
     func updateNotification(for schedule: Schedule) {
-        cancelNotification(for: schedule)
+        // scheduleNotification reconciles the AlarmKit alarm in place; cancelling
+        // it here races that Task and can drop the alarm, or churns it every launch.
+        cancelNotification(for: schedule, includingAlarm: schedule.alertDeliveryOption != .alarm)
         scheduleNotification(for: schedule)
     }
 
@@ -1145,12 +1255,20 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         return Array(allOccurrences.prefix(boundedCount))
     }
 
-    private func recurringOccurrences(for schedule: Schedule, through endDate: Date) -> [Date] {
+    /// Occurrences from `scheduledDate` through `endDate`, capped at
+    /// `maxFiniteRepeatOccurrences`. `after` skips occurrences at or before
+    /// that date without counting them toward the cap.
+    private func recurringOccurrences(
+        for schedule: Schedule,
+        through endDate: Date,
+        after lowerBound: Date? = nil
+    ) -> [Date] {
         guard schedule.repeatPattern != .never else { return [] }
         guard schedule.scheduledDate <= endDate else { return [] }
 
         let calendar = Calendar.current
         let limit = Self.maxFiniteRepeatOccurrences
+        let floor = lowerBound ?? .distantPast
         var occurrences: [Date] = []
         occurrences.reserveCapacity(limit)
 
@@ -1172,6 +1290,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     of: day
                    ),
                    occurrence >= schedule.scheduledDate,
+                   occurrence > floor,
                    occurrence <= endDate {
                     occurrences.append(occurrence)
                 }
@@ -1204,7 +1323,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     break
                 }
 
-                if nextDate >= schedule.scheduledDate {
+                if nextDate >= schedule.scheduledDate, nextDate > floor {
                     // For interval-based patterns, verify the interval
                     var include = true
                     if schedule.repeatPattern == .biweekly {
@@ -1241,6 +1360,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     of: day
                    ),
                    occurrence >= schedule.scheduledDate,
+                   occurrence > floor,
                    occurrence <= endDate {
                     occurrences.append(occurrence)
                 }
@@ -1252,7 +1372,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             let interval = max(1, schedule.repeatInterval)
             var cursor = schedule.scheduledDate
             while cursor <= endDate, occurrences.count < limit {
-                occurrences.append(cursor)
+                if cursor > floor {
+                    occurrences.append(cursor)
+                }
                 guard let next = calendar.date(byAdding: .day, value: interval, to: cursor) else { break }
                 cursor = next
             }
@@ -1274,6 +1396,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     of: day
                    ),
                    occurrence >= schedule.scheduledDate,
+                   occurrence > floor,
                    occurrence <= endDate {
                     occurrences.append(occurrence)
                 }
