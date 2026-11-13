@@ -30,29 +30,6 @@ actor NLPScheduleRouter {
         let timeZone: String
     }
 
-    private struct GeminiRequestBody: Encodable {
-        struct Content: Encodable {
-            struct Part: Encodable {
-                let text: String
-            }
-
-            let parts: [Part]
-        }
-
-        struct GenerationConfig: Encodable {
-            struct ThinkingConfig: Encodable {
-                let thinkingBudget: Int
-            }
-
-            let temperature: Double
-            let maxOutputTokens: Int
-            let thinkingConfig: ThinkingConfig?
-        }
-
-        let contents: [Content]
-        let generationConfig: GenerationConfig
-    }
-
     /// This mirrors the local ParsedSchedule schema so the saving pipeline
     /// does not care which parser produced it.
     private struct CloudResponseBody: Decodable {
@@ -77,24 +54,7 @@ actor NLPScheduleRouter {
         }
     }
 
-    private struct GeminiResponseBody: Decodable {
-        struct Candidate: Decodable {
-            struct Content: Decodable {
-                struct Part: Decodable {
-                    let text: String?
-                }
-
-                let parts: [Part]?
-            }
-
-            let content: Content?
-        }
-
-        let candidates: [Candidate]?
-    }
-
     private let requestTimeoutSeconds: TimeInterval = 1.5
-    private let geminiModelName = "gemini-flash-latest"
 
     func parse(_ input: String) async -> ParseResult {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -123,10 +83,6 @@ actor NLPScheduleRouter {
     private func parseViaCloud(_ input: String) async throws -> NLPScheduleParser.ParsedSchedule {
         if let endpointURL = resolveProxyURL() {
             return try await parseViaProxy(input, endpointURL: endpointURL)
-        }
-
-        if let geminiAPIKey = resolveGeminiAPIKey() {
-            return try await parseViaGemini(input, apiKey: geminiAPIKey)
         }
 
         throw RouterError.missingProxyURL
@@ -179,60 +135,6 @@ actor NLPScheduleRouter {
         return await mapCloudResponse(decoded)
     }
 
-    private func parseViaGemini(_ input: String, apiKey: String) async throws -> NLPScheduleParser.ParsedSchedule {
-        guard let endpoint = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(geminiModelName):generateContent?key=\(apiKey)") else {
-            throw RouterError.invalidResponse
-        }
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeoutSeconds
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let prompt = """
-        Extract scheduling details from user text and return ONLY valid JSON object with keys:
-        title (string), dateISO8601 (string|null), hasTime (boolean), priority (none|low|medium|high), tags (string[]), repeatPattern (never|daily|weekly|biweekly|monthly|yearly|weekdays), deliveryOption (push|alarm|null), earlyReminderMinutes (number|null).
-        Locale: \(Locale.current.identifier)
-        TimeZone: \(TimeZone.current.identifier)
-        Input: \(input)
-        """
-
-        let payload = GeminiRequestBody(
-            contents: [
-                .init(parts: [.init(text: prompt)])
-            ],
-            generationConfig: .init(
-                temperature: 0,
-                maxOutputTokens: 900,
-                thinkingConfig: .init(thinkingBudget: 0)
-            )
-        )
-        request.httpBody = try JSONEncoder().encode(payload)
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = requestTimeoutSeconds
-        configuration.timeoutIntervalForResource = requestTimeoutSeconds + 0.5
-        let session = URLSession(configuration: configuration)
-
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RouterError.invalidResponse
-        }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw RouterError.badStatus(httpResponse.statusCode)
-        }
-
-        let geminiResponse = try JSONDecoder().decode(GeminiResponseBody.self, from: data)
-        guard let content = geminiResponse.candidates?.first?.content?.parts?.first?.text,
-              let jsonData = extractJSONObjectData(from: content)
-        else {
-            throw RouterError.decodingFailed
-        }
-
-        let decoded = try decodeCloudResponse(jsonData)
-        return await mapCloudResponse(decoded)
-    }
-
     private func resolveProxyURL() -> URL? {
         let defaults = UserDefaults.standard
         if let configured = defaults.string(forKey: "settings.nlpProxyEndpoint")?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -247,29 +149,6 @@ actor NLPScheduleRouter {
            !plistValue.isEmpty
         {
             return url
-        }
-
-        return nil
-    }
-
-    private func resolveGeminiAPIKey() -> String? {
-        let defaults = UserDefaults.standard
-        if let configured = defaults.string(forKey: "settings.nlpGeminiAPIKey")?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !configured.isEmpty
-        {
-            return configured
-        }
-
-        if let plistValue = Bundle.main.object(forInfoDictionaryKey: "NLPGeminiAPIKey") as? String,
-           !plistValue.isEmpty
-        {
-            return plistValue
-        }
-
-        if let envValue = ProcessInfo.processInfo.environment["NLP_GEMINI_API_KEY"],
-           !envValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            return envValue
         }
 
         return nil
@@ -339,28 +218,6 @@ actor NLPScheduleRouter {
     private func parseDeliveryOption(_ raw: String?) -> AlertDeliveryOption? {
         guard let raw = raw?.lowercased() else { return nil }
         return AlertDeliveryOption(rawValue: raw)
-    }
-
-    private func extractJSONObjectData(from text: String) -> Data? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let data = trimmed.data(using: .utf8),
-           (try? JSONSerialization.jsonObject(with: data)) != nil
-        {
-            return data
-        }
-
-        guard let start = trimmed.firstIndex(of: "{"),
-              let end = trimmed.lastIndex(of: "}")
-        else {
-            return nil
-        }
-        let candidate = String(trimmed[start...end])
-        guard let data = candidate.data(using: .utf8),
-              (try? JSONSerialization.jsonObject(with: data)) != nil
-        else {
-            return nil
-        }
-        return data
     }
 
     private func isInternetUnavailable(_ error: Error) -> Bool {
