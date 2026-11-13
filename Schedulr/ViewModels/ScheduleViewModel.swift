@@ -272,6 +272,7 @@ final class ScheduleViewModel {
         restoreFromLocalBackupIfNeeded()
         consumeWidgetCompletionRequests()
         observeMarkAsReadNotifications()
+        observeRealtimeScheduleChanges()
         observeSiriIntents()
         observeNetworkRecovery()
     }
@@ -354,6 +355,16 @@ final class ScheduleViewModel {
         selectedDayIndex = (weekday - firstWeekday + 7) % 7
 
         zoomLevel = .week
+    }
+
+    private func observeRealtimeScheduleChanges() {
+        NotificationCenter.default.addObserver(
+            forName: .realtimeSchedulesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.fetchSchedules()
+        }
     }
 
     private func observeMarkAsReadNotifications() {
