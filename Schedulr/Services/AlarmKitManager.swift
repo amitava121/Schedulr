@@ -1,4 +1,5 @@
 #if os(iOS)
+import ActivityKit
 import AlarmKit
 import Foundation
 import OSLog
@@ -24,6 +25,12 @@ final class AlarmKitManager {
         category: "AlarmKit"
     )
 
+    private static let snoozeButton = AlarmButton(
+        text: "Snooze",
+        textColor: .orange,
+        systemImageName: "zzz"
+    )
+
     private init() {}
 
     /// Reconciles the system alarm for a schedule: creates/updates it when the
@@ -38,7 +45,7 @@ final class AlarmKitManager {
             return
         }
 
-        if let existing = manager.alarms.first(where: { $0.id == id }) {
+        if let existing = currentAlarm(id: id) {
             // Never cancel an alarm that is currently ringing.
             if existing.state == .alerting { return }
             // Same fire minute already registered → nothing to do.
@@ -52,11 +59,10 @@ final class AlarmKitManager {
         let snoozeEnabled = schedule.alarmSnoozeEnabled
         let alert = AlarmPresentation.Alert(
             title: LocalizedStringResource(stringLiteral: schedule.title),
-            stopButton: .stopButton,
-            secondaryButton: snoozeEnabled ? .snoozeButton : nil,
+            secondaryButton: snoozeEnabled ? Self.snoozeButton : nil,
             secondaryButtonBehavior: snoozeEnabled ? .countdown : nil
         )
-        let attributes = AlarmAttributes(
+        let attributes = AlarmAttributes<SchedulrAlarmMetadata>(
             presentation: AlarmPresentation(alert: alert),
             metadata: SchedulrAlarmMetadata(),
             tintColor: .orange
@@ -67,7 +73,7 @@ final class AlarmKitManager {
                 postAlert: TimeInterval(max(1, schedule.alarmSnoozeMinutes) * 60)
             )
             : nil
-        let configuration = AlarmManager.AlarmConfiguration(
+        let configuration = AlarmManager.AlarmConfiguration<SchedulrAlarmMetadata>(
             countdownDuration: countdown,
             schedule: .fixed(fireDate),
             attributes: attributes,
@@ -76,6 +82,9 @@ final class AlarmKitManager {
 
         do {
             _ = try await manager.schedule(id: id, configuration: configuration)
+            Self.logger.info(
+                "AlarmKit alarm scheduled for \(id.uuidString, privacy: .public) at \(fireDate, privacy: .public)"
+            )
         } catch {
             Self.logger.error(
                 "AlarmKit schedule failed for \(id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
@@ -86,12 +95,17 @@ final class AlarmKitManager {
     /// Cancels the registered system alarm unless it is currently ringing —
     /// killing a ringing alarm would silence it without the user stopping it.
     func cancelAlarm(for id: UUID) {
-        let manager = AlarmManager.shared
-        if let existing = manager.alarms.first(where: { $0.id == id }),
-           existing.state == .alerting {
-            return
+        if currentAlarm(id: id)?.state == .alerting { return }
+        try? AlarmManager.shared.cancel(id: id)
+    }
+
+    private func currentAlarm(id: UUID) -> Alarm? {
+        do {
+            return try AlarmManager.shared.alarms.first(where: { $0.id == id })
+        } catch {
+            Self.logger.error("AlarmKit alarms lookup failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
-        try? manager.cancel(id: id)
     }
 }
 #endif
