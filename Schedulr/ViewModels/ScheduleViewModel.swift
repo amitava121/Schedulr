@@ -405,6 +405,20 @@ final class ScheduleViewModel {
         }
     }
 
+    /// Applies schedules the realtime listener just merged into the model
+    /// context: rebuilds the cached lists and syncs local notifications.
+    func handleRemoteScheduleChanges(_ changed: [Schedule]) {
+        guard !changed.isEmpty else { return }
+        for schedule in changed {
+            if schedule.isSoftDeleted {
+                NotificationManager.shared.cancelNotification(for: schedule)
+            } else {
+                NotificationManager.shared.updateNotification(for: schedule)
+            }
+        }
+        fetchSchedules()
+    }
+
     func schedules(for date: Date) -> [Schedule] {
         let day = date.startOfDay
         if let cached = schedulesByDay[day] {

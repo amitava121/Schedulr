@@ -212,21 +212,21 @@ struct ScheduleDelta: Codable, Identifiable {
     func firestoreData() -> [String: Any] {
         [
             "scheduleID": scheduleID,
-            "createdAt": Timestamp(date: createdAt),
-            "updatedAt": Timestamp(date: updatedAt),
-            "deletedAt": deletedAt.map { Timestamp(date: $0) } as Any,
+            "createdAt": (FirestoreDatabase.timestamp(from: createdAt) ?? NSNull()) as Any,
+            "updatedAt": (FirestoreDatabase.timestamp(from: updatedAt) ?? NSNull()) as Any,
+            "deletedAt": deletedAt.map { FirestoreDatabase.timestamp(from: $0) ?? NSNull() } as Any,
             "isSoftDeleted": isSoftDeleted,
             "lastModifiedDeviceID": lastModifiedDeviceID,
             "title": title,
             "notes": notes as Any,
             "urlString": urlString as Any,
-            "scheduledDate": Timestamp(date: scheduledDate),
+            "scheduledDate": (FirestoreDatabase.timestamp(from: scheduledDate) ?? NSNull()) as Any,
             "isUrgent": isUrgent,
             "repeatPatternRaw": repeatPatternRaw,
             "repeatWeekdays": repeatWeekdays,
-            "excludedOccurrenceDates": excludedOccurrenceDates.map { Timestamp(date: $0) },
+            "excludedOccurrenceDates": excludedOccurrenceDates.compactMap { FirestoreDatabase.timestamp(from: $0) },
             "repeatEndOptionRaw": repeatEndOptionRaw,
-            "repeatEndDate": repeatEndDate.map { Timestamp(date: $0) } as Any,
+            "repeatEndDate": repeatEndDate.map { FirestoreDatabase.timestamp(from: $0) ?? NSNull() } as Any,
             "alertDeliveryRaw": alertDeliveryRaw,
             "alarmSoundRaw": alarmSoundRaw,
             "alarmSnoozeEnabled": alarmSnoozeEnabled,
@@ -244,7 +244,7 @@ struct ScheduleDelta: Codable, Identifiable {
             "syncVersion": syncVersion,
             "conflictResolutionTag": conflictResolutionTag as Any,
             "deviceID": deviceID,
-            "clientUpdatedAt": Timestamp(date: clientUpdatedAt),
+            "clientUpdatedAt": (FirestoreDatabase.timestamp(from: clientUpdatedAt) ?? NSNull()) as Any,
             "serverUpdatedAt": FieldValue.serverTimestamp()
         ]
     }
@@ -373,6 +373,14 @@ final class FirebaseSyncService {
     private static let deviceIDStorageKey = "scheduleDeviceID.v1"
     private static let inlineBackupByteLimit = 700_000
     private static let legacyGranularMigrationStateKey = "sync.legacyGranularMigrationState.v1"
+    // Backup items (exportBackupData) use legacy names; granular docs use *Raw.
+    private static let legacyToGranularScheduleKeys: [(legacy: String, granular: String)] = [
+        ("repeatPattern", "repeatPatternRaw"),
+        ("repeatEndOption", "repeatEndOptionRaw"),
+        ("alertDeliveryOption", "alertDeliveryRaw"),
+        ("alarmSoundOption", "alarmSoundRaw"),
+        ("priority", "priorityRaw")
+    ]
 
     private static let iso8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -1318,8 +1326,21 @@ final class FirebaseSyncService {
             incomingIDs.insert(scheduleID)
             schedule.removeValue(forKey: "id")
             normalizeScheduleDateFields(in: &schedule)
+            // Backup items use legacy key names; the granular schema and the
+            // realtime listener read the *Raw variants.
+            for (legacy, granular) in Self.legacyToGranularScheduleKeys {
+                if schedule[granular] == nil {
+                    schedule[granular] = schedule.removeValue(forKey: legacy)
+                } else {
+                    schedule.removeValue(forKey: legacy)
+                }
+            }
             schedule["scheduleID"] = scheduleID
             schedule["writerDeviceID"] = currentDeviceID
+            // Preserve the backup's own edit time as clientUpdatedAt so the
+            // listener compares edit times, not this migration's write time,
+            // and does not overwrite newer local edits.
+            schedule["clientUpdatedAt"] = schedule["updatedAt"] ?? NSNull()
             schedule["updatedAt"] = FieldValue.serverTimestamp()
             normalizedSchedules.append((id: scheduleID, data: schedule))
         }
@@ -1365,9 +1386,9 @@ final class FirebaseSyncService {
         if value is NSNull { return }
         if let timestamp = timestampValue(from: value) {
             dictionary[key] = timestamp
-        } else if value is Date {
-            // A Date Firestore cannot represent (e.g. Date.distantPast) would throw
-            // 'Invalid timestamp' during setData encoding — write null instead.
+        } else if parseableDate(from: value) != nil {
+            // A date Firestore cannot represent (e.g. Date.distantPast or its
+            // ISO-8601 text) would throw 'Invalid timestamp' — write null instead.
             dictionary[key] = NSNull()
         }
     }
@@ -1381,26 +1402,25 @@ final class FirebaseSyncService {
         dictionary[key] = timestamps
     }
 
-    // Firestore rejects dates outside 0001-01-01...9999-12-31 ('Invalid timestamp').
-    private static let firestoreDateRange =
-        Date(timeIntervalSince1970: -62_135_596_800)...Date(timeIntervalSince1970: 253_402_300_799)
+    private func parseableDate(from value: Any) -> Date? {
+        if let date = value as? Date { return date }
+        if let text = value as? String {
+            return SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.date(from: text)
+                ?? Self.iso8601Formatter.date(from: text)
+        }
+        return nil
+    }
 
     private func timestampValue(from value: Any) -> Timestamp? {
         if let timestamp = value as? Timestamp {
             return timestamp
         }
-        if let date = value as? Date {
-            guard Self.firestoreDateRange.contains(date) else { return nil }
-            return Timestamp(date: date)
+        guard let date = parseableDate(from: value),
+              FirestoreDatabase.validDateRange.contains(date)
+        else {
+            return nil
         }
-        if let text = value as? String,
-           let date = SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.date(from: text)
-            ?? Self.iso8601Formatter.date(from: text)
-        {
-            guard Self.firestoreDateRange.contains(date) else { return nil }
-            return Timestamp(date: date)
-        }
-        return nil
+        return Timestamp(date: date)
     }
 
     private func structuredBackupData(
