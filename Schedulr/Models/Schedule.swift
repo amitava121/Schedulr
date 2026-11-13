@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import SchedulrLogic
 
 enum AlarmSoundOption: String, Codable, CaseIterable, Identifiable {
     case defaultRingtone
@@ -570,7 +571,7 @@ enum AlarmSoundOption: String, Codable, CaseIterable, Identifiable {
 }
 
 @Model
-final class Schedule {
+final class Schedule: ScheduleState {
     @Attribute(.unique)
     var id: UUID
     var createdAt: Date
