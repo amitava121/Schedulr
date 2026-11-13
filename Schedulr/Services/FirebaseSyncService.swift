@@ -371,8 +371,6 @@ final class FirebaseSyncService {
     static let shared = FirebaseSyncService()
     private static let installMarkerKey = "schedulr.install.marker.v1"
     private static let deviceIDStorageKey = "scheduleDeviceID.v1"
-    private static let firestoreDatabaseInfoKey = "FIRESTORE_DATABASE_ID"
-    private static let legacyFirestoreDatabaseInfoKey = "FirestoreDatabaseID"
     private static let inlineBackupByteLimit = 700_000
     private static let legacyGranularMigrationStateKey = "sync.legacyGranularMigrationState.v1"
 
@@ -394,23 +392,12 @@ final class FirebaseSyncService {
     var profilePhotoData: Data?
 
     private var configuredFirestoreDatabaseID: String? {
-        let primary = Bundle.main.object(forInfoDictionaryKey: Self.firestoreDatabaseInfoKey) as? String
-        let legacy = Bundle.main.object(forInfoDictionaryKey: Self.legacyFirestoreDatabaseInfoKey) as? String
-        let raw = (primary ?? legacy)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !raw.isEmpty else { return nil }
-        if raw == "(default)" || raw.caseInsensitiveCompare("default") == .orderedSame {
-            return nil
-        }
-        return raw
+        FirestoreDatabase.configuredID
     }
 
     // Defaults to Firestore "(default)" unless FIRESTORE_DATABASE_ID is configured in Info.plist.
     private var firestore: Firestore {
-        guard let app = FirebaseApp.app() else { return Firestore.firestore() }
-        if let configuredFirestoreDatabaseID {
-            return Firestore.firestore(app: app, database: configuredFirestoreDatabaseID)
-        }
-        return Firestore.firestore(app: app)
+        FirestoreDatabase.firestore()
     }
 
     private var backupListener: ListenerRegistration?
@@ -1378,6 +1365,10 @@ final class FirebaseSyncService {
         if value is NSNull { return }
         if let timestamp = timestampValue(from: value) {
             dictionary[key] = timestamp
+        } else if value is Date {
+            // A Date Firestore cannot represent (e.g. Date.distantPast) would throw
+            // 'Invalid timestamp' during setData encoding — write null instead.
+            dictionary[key] = NSNull()
         }
     }
 
@@ -1390,17 +1381,23 @@ final class FirebaseSyncService {
         dictionary[key] = timestamps
     }
 
+    // Firestore rejects dates outside 0001-01-01...9999-12-31 ('Invalid timestamp').
+    private static let firestoreDateRange =
+        Date(timeIntervalSince1970: -62_135_596_800)...Date(timeIntervalSince1970: 253_402_300_799)
+
     private func timestampValue(from value: Any) -> Timestamp? {
         if let timestamp = value as? Timestamp {
             return timestamp
         }
         if let date = value as? Date {
+            guard Self.firestoreDateRange.contains(date) else { return nil }
             return Timestamp(date: date)
         }
         if let text = value as? String,
            let date = SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.date(from: text)
             ?? Self.iso8601Formatter.date(from: text)
         {
+            guard Self.firestoreDateRange.contains(date) else { return nil }
             return Timestamp(date: date)
         }
         return nil
