@@ -2030,7 +2030,7 @@ final class ScheduleViewModel {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             guard let data = try? encoder.encode(payload) else { return }
-            try? data.write(to: fileURL, options: [.atomic])
+            try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
         }
     }
 
