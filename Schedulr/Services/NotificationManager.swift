@@ -120,7 +120,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 let nextFireDate = nextAlarmFireDate(for: schedule)
                 await AlarmKitManager.shared.updateAlarm(
                     for: schedule,
-                    alarmSchedule: alarmKitSchedule(for: schedule)
+                    alarmSchedule: alarmKitSchedule(for: schedule, nextFireDate: nextFireDate)
                         ?? nextFireDate.map { .fixed($0) },
                     nextFireDate: nextFireDate
                 )
@@ -182,7 +182,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// AlarmKit-native schedule for repeat patterns it can express directly;
     /// nil falls back to a single fixed alarm at the next occurrence for
     /// patterns AlarmKit can't represent (interval and monthly rules).
-    private func alarmKitSchedule(for schedule: Schedule) -> Alarm.Schedule? {
+    private func alarmKitSchedule(for schedule: Schedule, nextFireDate: Date?, now: Date = Date()) -> Alarm.Schedule? {
         let calendar = Calendar.current
         let time = Alarm.Schedule.Relative.Time(
             hour: calendar.component(.hour, from: schedule.scheduledDate),
@@ -202,8 +202,26 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 }
             }
         }
-        func weeklyRecurrence(_ calendarWeekdays: [Int]) -> Alarm.Schedule {
-            .relative(.init(
+
+        // AlarmKit's `.relative` recurrence has no start or end bound: it rings
+        // on every matching (weekday, time) slot forever. It is only safe when
+        // the series is open-ended and the recurrence's next slot coincides
+        // with the schedule's real next occurrence — otherwise a finite series
+        // would ring past its end, or a future-starting series would ring
+        // early. In those cases a one-off fixed alarm is registered instead and
+        // each reconcile re-evaluates (converging to `.relative` once slots
+        // line up). `nextFireDate` already returns nil past the end boundary.
+        func boundedWeeklyRecurrence(_ calendarWeekdays: [Int]) -> Alarm.Schedule? {
+            guard let nextFireDate,
+                  repeatEndBoundary(for: schedule) == nil,
+                  let slot = earliestRecurrenceSlot(
+                      weekdays: Set(calendarWeekdays), time: time, after: now
+                  ),
+                  Int(slot.timeIntervalSince1970) / 60 >= Int(nextFireDate.timeIntervalSince1970) / 60
+            else {
+                return nil
+            }
+            return .relative(.init(
                 time: time,
                 repeats: .weekly(localeWeekdays(calendarWeekdays))
             ))
@@ -214,19 +232,42 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             return .fixed(schedule.scheduledDate)
         case .daily:
             // `.daily` honors repeatWeekdays the same way notifications do.
-            return weeklyRecurrence(normalizedWeekdays(schedule.repeatWeekdays))
+            return boundedWeeklyRecurrence(normalizedWeekdays(schedule.repeatWeekdays))
         case .weekdays:
-            return weeklyRecurrence([2, 3, 4, 5, 6])
+            return boundedWeeklyRecurrence([2, 3, 4, 5, 6])
         case .weekly:
-            return weeklyRecurrence([calendar.component(.weekday, from: schedule.scheduledDate)])
+            return boundedWeeklyRecurrence([calendar.component(.weekday, from: schedule.scheduledDate)])
         case .customWeekdays:
             let days = schedule.repeatWeekdays.isEmpty
                 ? [calendar.component(.weekday, from: schedule.scheduledDate)]
                 : schedule.repeatWeekdays
-            return weeklyRecurrence(days)
+            return boundedWeeklyRecurrence(days)
         case .biweekly, .monthly, .yearly, .everyNDays, .everyNWeeks, .everyNMonths:
             return nil
         }
+    }
+
+    /// Earliest upcoming (weekday, hour:minute) slot a weekly AlarmKit
+    /// recurrence would fire on, or nil within the next 8 days.
+    private func earliestRecurrenceSlot(
+        weekdays: Set<Int>,
+        time: Alarm.Schedule.Relative.Time,
+        after now: Date
+    ) -> Date? {
+        let calendar = Calendar.current
+        for offset in 0..<8 {
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+            var comps = calendar.dateComponents([.year, .month, .day], from: day)
+            comps.hour = time.hour
+            comps.minute = time.minute
+            comps.second = 0
+            guard let candidate = calendar.date(from: comps),
+                  candidate > now,
+                  weekdays.contains(calendar.component(.weekday, from: candidate))
+            else { continue }
+            return candidate
+        }
+        return nil
     }
 #endif
 
