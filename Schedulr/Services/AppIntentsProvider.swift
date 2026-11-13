@@ -172,9 +172,12 @@ struct SchedulePriorityEntity: AppEntity {
 struct SchedulePriorityQuery: EntityQuery {
     @MainActor
     func entities(for identifiers: [String]) async throws -> [SchedulePriorityEntity] {
-        SchedulePriority.allCases
-            .filter { identifiers.contains($0.displayName) }
-            .map { SchedulePriorityEntity(id: $0.displayName, value: $0) }
+        EntityExtraction.extract(
+            identifiers: identifiers,
+            allEntities: SchedulePriority.allCases,
+            idProvider: { $0.displayName }
+        )
+        .map { SchedulePriorityEntity(id: $0.displayName, value: $0) }
     }
 
     @MainActor
