@@ -53,11 +53,16 @@ final class AlarmKitManager {
             return
         }
 
+        let fingerprint = configFingerprint(for: schedule)
         if let existing = currentAlarm(id: id) {
             // Never touch an alarm that is ringing, counting down to its next
             // ring (snooze), or paused — only replace a still-pending one.
             guard existing.state == .scheduled else { return }
-            if Self.isSameSchedule(existing.schedule, desired) { return }
+            // The daemon can't report back presentation/sound/snooze config,
+            // so the last-applied fingerprint decides whether an edit that
+            // kept the same alarm time also needs a re-registration.
+            if Self.isSameSchedule(existing.schedule, desired),
+               storedFingerprint(for: id) == fingerprint { return }
             Self.logger.debug(
                 "AlarmKit replacing \(id.uuidString, privacy: .public): existing=\(String(describing: existing.schedule), privacy: .public) desired=\(String(describing: desired), privacy: .public)"
             )
@@ -93,6 +98,7 @@ final class AlarmKitManager {
 
         do {
             _ = try await manager.schedule(id: id, configuration: configuration)
+            UserDefaults.standard.set(fingerprint, forKey: Self.fingerprintKey(for: id))
             Self.logger.info(
                 "AlarmKit alarm scheduled for \(id.uuidString, privacy: .public) at \(fireDate, privacy: .public)"
             )
@@ -109,6 +115,7 @@ final class AlarmKitManager {
     /// nothing is registered so push-only schedules don't emit
     /// `Alarm does not exist` noise in mobiletimerd.
     func cancelAlarm(for id: UUID) {
+        UserDefaults.standard.removeObject(forKey: Self.fingerprintKey(for: id))
         guard let existing = currentAlarm(id: id),
               existing.state == .scheduled else { return }
         try? AlarmManager.shared.cancel(id: id)
@@ -133,6 +140,23 @@ final class AlarmKitManager {
         default:
             return false
         }
+    }
+
+    /// Everything `isSameSchedule` can't see: the presentation and delivery
+    /// options (title, snooze button/duration, sound) that AlarmKit never
+    /// reports back. Persisted so a config-only edit still re-registers the
+    /// alarm, including across launches.
+    private func configFingerprint(for schedule: Schedule) -> String {
+        let sound = schedule.alarmSoundOption.bestAvailableBundledSoundFileName ?? "default"
+        return "\(schedule.title)|snooze=\(schedule.alarmSnoozeEnabled)|mins=\(schedule.alarmSnoozeMinutes)|sound=\(sound)"
+    }
+
+    private static func fingerprintKey(for id: UUID) -> String {
+        "alarmkit.fingerprint.\(id.uuidString)"
+    }
+
+    private func storedFingerprint(for id: UUID) -> String? {
+        UserDefaults.standard.string(forKey: Self.fingerprintKey(for: id))
     }
 
     private func currentAlarm(id: UUID) -> Alarm? {
