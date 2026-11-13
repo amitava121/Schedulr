@@ -94,8 +94,11 @@ final class AlarmKitManager {
 
     /// Cancels the registered system alarm unless it is currently ringing —
     /// killing a ringing alarm would silence it without the user stopping it.
+    /// Returns early when nothing is registered so push-only schedules don't
+    /// emit `Alarm does not exist` noise in mobiletimerd.
     func cancelAlarm(for id: UUID) {
-        if currentAlarm(id: id)?.state == .alerting { return }
+        guard let existing = currentAlarm(id: id) else { return }
+        if existing.state == .alerting { return }
         try? AlarmManager.shared.cancel(id: id)
     }
 
