@@ -212,21 +212,21 @@ struct ScheduleDelta: Codable, Identifiable {
     func firestoreData() -> [String: Any] {
         [
             "scheduleID": scheduleID,
-            "createdAt": Timestamp(date: createdAt),
-            "updatedAt": Timestamp(date: updatedAt),
-            "deletedAt": deletedAt.map { Timestamp(date: $0) } as Any,
+            "createdAt": FirestoreDatabase.timestampOrNull(createdAt),
+            "updatedAt": FirestoreDatabase.timestampOrNull(updatedAt),
+            "deletedAt": FirestoreDatabase.timestampOrNull(deletedAt),
             "isSoftDeleted": isSoftDeleted,
             "lastModifiedDeviceID": lastModifiedDeviceID,
             "title": title,
             "notes": notes as Any,
             "urlString": urlString as Any,
-            "scheduledDate": Timestamp(date: scheduledDate),
+            "scheduledDate": FirestoreDatabase.timestampOrNull(scheduledDate),
             "isUrgent": isUrgent,
             "repeatPatternRaw": repeatPatternRaw,
             "repeatWeekdays": repeatWeekdays,
-            "excludedOccurrenceDates": excludedOccurrenceDates.map { Timestamp(date: $0) },
+            "excludedOccurrenceDates": FirestoreDatabase.timestamps(excludedOccurrenceDates),
             "repeatEndOptionRaw": repeatEndOptionRaw,
-            "repeatEndDate": repeatEndDate.map { Timestamp(date: $0) } as Any,
+            "repeatEndDate": FirestoreDatabase.timestampOrNull(repeatEndDate),
             "alertDeliveryRaw": alertDeliveryRaw,
             "alarmSoundRaw": alarmSoundRaw,
             "alarmSnoozeEnabled": alarmSnoozeEnabled,
@@ -244,7 +244,7 @@ struct ScheduleDelta: Codable, Identifiable {
             "syncVersion": syncVersion,
             "conflictResolutionTag": conflictResolutionTag as Any,
             "deviceID": deviceID,
-            "clientUpdatedAt": Timestamp(date: clientUpdatedAt),
+            "clientUpdatedAt": FirestoreDatabase.timestampOrNull(clientUpdatedAt),
             "serverUpdatedAt": FieldValue.serverTimestamp()
         ]
     }
@@ -1320,7 +1320,11 @@ final class FirebaseSyncService {
             normalizeScheduleDateFields(in: &schedule)
             schedule["scheduleID"] = scheduleID
             schedule["writerDeviceID"] = currentDeviceID
-            schedule["updatedAt"] = FieldValue.serverTimestamp()
+            // Keep the item's own updatedAt: RealtimeSyncCoordinator compares it with local
+            // edits, so a server write time would let an older backup overwrite newer edits.
+            if !(schedule["updatedAt"] is Timestamp) {
+                schedule["updatedAt"] = FieldValue.serverTimestamp()
+            }
             normalizedSchedules.append((id: scheduleID, data: schedule))
         }
 
@@ -1363,42 +1367,30 @@ final class FirebaseSyncService {
     private func convertDateField(in dictionary: inout [String: Any], key: String) {
         guard let value = dictionary[key] else { return }
         if value is NSNull { return }
-        if let timestamp = timestampValue(from: value) {
+        if let timestamp = value as? Timestamp {
             dictionary[key] = timestamp
-        } else if value is Date {
-            // A Date Firestore cannot represent (e.g. Date.distantPast) would throw
-            // 'Invalid timestamp' during setData encoding — write null instead.
-            dictionary[key] = NSNull()
+        } else if let date = dateValue(from: value) {
+            // Dates Firestore cannot represent (e.g. Date.distantPast) become null.
+            dictionary[key] = FirestoreDatabase.timestampOrNull(date)
         }
     }
 
     private func convertDateArrayField(in dictionary: inout [String: Any], key: String) {
         guard let values = dictionary[key] as? [Any] else { return }
         let timestamps = values.compactMap { value -> Timestamp? in
-            if value is NSNull { return nil }
-            return timestampValue(from: value)
+            if let timestamp = value as? Timestamp { return timestamp }
+            return dateValue(from: value).flatMap { FirestoreDatabase.timestampOrNull($0) as? Timestamp }
         }
         dictionary[key] = timestamps
     }
 
-    // Firestore rejects dates outside 0001-01-01...9999-12-31 ('Invalid timestamp').
-    private static let firestoreDateRange =
-        Date(timeIntervalSince1970: -62_135_596_800)...Date(timeIntervalSince1970: 253_402_300_799)
-
-    private func timestampValue(from value: Any) -> Timestamp? {
-        if let timestamp = value as? Timestamp {
-            return timestamp
-        }
+    private func dateValue(from value: Any) -> Date? {
         if let date = value as? Date {
-            guard Self.firestoreDateRange.contains(date) else { return nil }
-            return Timestamp(date: date)
+            return date
         }
-        if let text = value as? String,
-           let date = SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.date(from: text)
-            ?? Self.iso8601Formatter.date(from: text)
-        {
-            guard Self.firestoreDateRange.contains(date) else { return nil }
-            return Timestamp(date: date)
+        if let text = value as? String {
+            return SchedulrLogic.JSONSerializationUtils.iso8601WithFractionalSecondsFormatter.date(from: text)
+                ?? Self.iso8601Formatter.date(from: text)
         }
         return nil
     }

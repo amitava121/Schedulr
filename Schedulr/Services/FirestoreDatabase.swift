@@ -27,4 +27,19 @@ enum FirestoreDatabase {
         }
         return Firestore.firestore(app: app)
     }
+
+    /// Firestore rejects dates outside 0001-01-01...9999-12-31 ('Invalid timestamp').
+    static let validDateRange =
+        Date(timeIntervalSince1970: -62_135_596_800)...Date(timeIntervalSince1970: 253_402_300_799)
+
+    /// `Timestamp` for `date`, or `NSNull` when it is nil or outside Firestore's range
+    /// (e.g. `Date.distantPast`), which would otherwise crash `setData` encoding.
+    static func timestampOrNull(_ date: Date?) -> Any {
+        guard let date, validDateRange.contains(date) else { return NSNull() }
+        return Timestamp(date: date)
+    }
+
+    static func timestamps(_ dates: [Date]) -> [Timestamp] {
+        dates.filter { validDateRange.contains($0) }.map { Timestamp(date: $0) }
+    }
 }
