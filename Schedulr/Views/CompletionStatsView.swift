@@ -1,4 +1,5 @@
 import SwiftUI
+import SchedulrLogic
 
 // MARK: - Stats Model
 

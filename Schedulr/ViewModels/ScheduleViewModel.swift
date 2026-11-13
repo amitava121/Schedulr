@@ -2,6 +2,7 @@ import Foundation
 import OSLog
 import SwiftData
 import SwiftUI
+import SchedulrLogic
 #if os(iOS)
 import UIKit
 #endif

@@ -1,20 +1,10 @@
 import Foundation
+import SchedulrLogic
 
-enum RepeatPattern: String, Codable, CaseIterable, Identifiable {
-    case never = "Never"
-    case daily = "Daily"
-    case weekdays = "Weekdays"
-    case weekly = "Weekly"
-    case biweekly = "Biweekly"
-    case monthly = "Monthly"
-    case yearly = "Yearly"
-    case everyNDays = "Every N Days"
-    case everyNWeeks = "Every N Weeks"
-    case everyNMonths = "Every N Months"
-    case customWeekdays = "Custom Weekdays"
+typealias RepeatPattern = SchedulrLogic.RepeatPattern
+typealias RepeatEndOption = SchedulrLogic.RepeatEndOption
 
-    var id: String { rawValue }
-
+extension SchedulrLogic.RepeatPattern {
     var displayName: String { rawValue }
 
     /// Whether this pattern uses the `repeatInterval` field on Schedule.
@@ -47,12 +37,9 @@ enum RepeatPattern: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum RepeatEndOption: String, Codable, CaseIterable, Identifiable {
-    case never = "Never"
-    case onDate = "On Date"
-    case afterCount = "After Count"
-
-    var id: String { rawValue }
+extension SchedulrLogic.RepeatEndOption: @retroactive CaseIterable, @retroactive Identifiable {
+    public static var allCases: [Self] { [.never, .onDate, .afterCount] }
+    public var id: String { rawValue }
 
     var displayName: String { rawValue }
 }

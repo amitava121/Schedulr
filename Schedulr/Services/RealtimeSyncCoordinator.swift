@@ -3,6 +3,7 @@ import SwiftData
 import FirebaseAuth
 @preconcurrency import FirebaseFirestore
 import OSLog
+import SchedulrLogic
 
 @MainActor
 final class RealtimeSyncCoordinator {

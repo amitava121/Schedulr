@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import SchedulrLogic
 
 @MainActor
 final class DailyDigestService {

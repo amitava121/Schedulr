@@ -1,6 +1,7 @@
 import Foundation
 import EventKit
 import OSLog
+import SchedulrLogic
 #if canImport(UIKit)
 import UIKit
 #endif

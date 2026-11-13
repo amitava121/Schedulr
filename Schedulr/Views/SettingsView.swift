@@ -1,5 +1,6 @@
 import SwiftUI
 import UserNotifications
+import SchedulrLogic
 #if os(iOS)
 import UIKit
 #endif

@@ -1,4 +1,5 @@
 import Foundation
+import SchedulrLogic
 
 struct SyncBackupPayload {
     var schedules: [ScheduleDelta]

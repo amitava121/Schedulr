@@ -1,6 +1,7 @@
 import AppIntents
 import SwiftData
 import Foundation
+import SchedulrLogic
 
 // MARK: - Add Schedule Intent
 

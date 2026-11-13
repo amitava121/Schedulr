@@ -1,12 +1,9 @@
 import SwiftUI
+import SchedulrLogic
 
-enum SchedulePriority: Int, Codable, CaseIterable, Identifiable {
-    case none = 0
-    case low = 1
-    case medium = 2
-    case high = 3
+typealias SchedulePriority = SchedulrLogic.SchedulePriority
 
-    var id: Int { rawValue }
+extension SchedulrLogic.SchedulePriority {
 
     var displayName: String {
         switch self {

@@ -1,4 +1,5 @@
 import Foundation
+import SchedulrLogic
 
 /// Detects scheduling conflicts (overlapping events).
 enum ConflictDetectionService {

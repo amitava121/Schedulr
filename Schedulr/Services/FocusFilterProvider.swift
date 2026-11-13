@@ -1,5 +1,6 @@
 import AppIntents
 import SwiftUI
+import SchedulrLogic
 
 // MARK: - Focus Filter Intent
 

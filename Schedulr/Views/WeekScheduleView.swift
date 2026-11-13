@@ -1,4 +1,5 @@
 import SwiftUI
+import SchedulrLogic
 
 struct WeekScheduleView: View {
     @Bindable var viewModel: ScheduleViewModel

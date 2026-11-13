@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import UserNotifications
+import SchedulrLogic
 #if canImport(WidgetKit)
 import WidgetKit
 #endif

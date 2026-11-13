@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import SchedulrLogic
 #if os(iOS)
 import FirebaseAuth
 #if canImport(GoogleSignIn)
