@@ -1391,7 +1391,10 @@ private struct CameraImagePicker: UIViewControllerRepresentable {
         return picker
     }
 
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {
+        // No updates needed for this static picker view controller.
+        // This empty implementation is required to satisfy the UIViewControllerRepresentable protocol.
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onPicked: onPicked)

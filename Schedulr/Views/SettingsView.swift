@@ -842,7 +842,10 @@ struct ShareSheetView: UIViewControllerRepresentable {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
+        // No updates needed for the share sheet.
+        // This empty implementation is required to satisfy the UIViewControllerRepresentable protocol.
+    }
 }
 #else
 struct ShareSheetView: View {
