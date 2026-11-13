@@ -17,16 +17,7 @@ enum EventKitExportService {
     // MARK: - EventKit Export
 
     static func exportToCalendar(schedule: Schedule) async -> Bool {
-        let granted: Bool
-        if #available(iOS 17.0, *) {
-            granted = (try? await eventStore.requestFullAccessToEvents()) ?? false
-        } else {
-            granted = await withCheckedContinuation { continuation in
-                eventStore.requestAccess(to: .event) { granted, _ in
-                    continuation.resume(returning: granted)
-                }
-            }
-        }
+        let granted = (try? await eventStore.requestFullAccessToEvents()) ?? false
 
         guard granted else { return false }
 
