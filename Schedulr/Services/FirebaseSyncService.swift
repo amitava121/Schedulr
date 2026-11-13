@@ -1491,23 +1491,34 @@ final class FirebaseSyncService {
         }
     }
 
+    private static let granularToLegacyScheduleKeys = Dictionary(
+        uniqueKeysWithValues: legacyToGranularScheduleKeys.map { ($0.granular, $0.legacy) }
+    )
+    private static let scheduleDocumentSkipKeys: Set<String> = [
+        "scheduleID", "writerDeviceID", "serverUpdatedAt", "deviceID",
+        "clientUpdatedAt", "updatedAt"
+    ]
+
+    // Reconstructs a BackupScheduleItem-compatible object from a granular doc:
+    // *Raw keys map back to legacy names, and the schedule's own edit time is
+    // emitted as updatedAt (required by BackupScheduleItem decoding).
     private func scheduleDocumentJSON(from document: QueryDocumentSnapshot) -> [String: Any] {
         var json: [String: Any] = ["id": document.documentID]
-        for (key, value) in document.data() {
-            if key == "scheduleID"
-                || key == "writerDeviceID"
-                || key == "updatedAt"
-                || key == "serverUpdatedAt"
-                || key == "clientUpdatedAt"
-                || key == "deviceID"
-            {
+        let data = document.data()
+        for (key, value) in data {
+            if Self.scheduleDocumentSkipKeys.contains(key) { continue }
+            // A legacy key superseded by its granular counterpart in this doc.
+            if Self.legacyToGranularScheduleKeys.contains(where: {
+                $0.legacy == key && data[$0.granular] != nil
+            }) {
                 continue
             }
-            if let normalized = jsonCompatibleValue(from: value) {
-                json[key] = normalized
-            } else {
-                json[key] = NSNull()
-            }
+            let outputKey = Self.granularToLegacyScheduleKeys[key] ?? key
+            json[outputKey] = jsonCompatibleValue(from: value) ?? NSNull()
+        }
+        json["updatedAt"] = jsonCompatibleValue(from: data["clientUpdatedAt"] ?? data["updatedAt"] ?? NSNull()) ?? NSNull()
+        if json["lastModifiedDeviceID"] == nil {
+            json["lastModifiedDeviceID"] = jsonCompatibleValue(from: data["writerDeviceID"]) ?? ""
         }
         return json
     }
