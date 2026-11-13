@@ -6,6 +6,7 @@ import SchedulrLogic
 import WidgetKit
 #endif
 #if os(iOS)
+import AlarmKit
 import AudioToolbox
 import UIKit
 #endif
@@ -107,12 +108,24 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 isAuthorized = authorized
             }
 
-            guard settings.authorizationStatus != .denied else { return }
-
             if shouldSuppressForFocus {
                 cancelNotification(for: schedule)
                 return
             }
+
+#if os(iOS)
+            // AlarmKit has its own authorization; register system alarms even
+            // when notification access is denied.
+            if schedule.alertDeliveryOption == .alarm {
+                await AlarmKitManager.shared.updateAlarm(
+                    for: schedule,
+                    alarmSchedule: alarmKitSchedule(for: schedule),
+                    nextFireDate: nextAlarmFireDate(for: schedule)
+                )
+            }
+#endif
+
+            guard settings.authorizationStatus != .denied else { return }
 
             if authorized || settings.authorizationStatus == .notDetermined {
                 // Always schedule local notifications — they are the reliable backbone.
@@ -142,28 +155,78 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     }
                 }
             }
+        }
+    }
+
+    /// Next date the alarm should actually fire; nil when nothing is pending
+    /// or the repeat series has already ended.
+    private func nextAlarmFireDate(for schedule: Schedule, now: Date = Date()) -> Date? {
+        let next: Date?
+        if schedule.repeatPattern == .never {
+            next = schedule.scheduledDate > now ? schedule.scheduledDate : nil
+        } else {
+            let horizon = Calendar.current.date(byAdding: .year, value: 1, to: now)
+                ?? schedule.scheduledDate
+            next = recurringOccurrences(for: schedule, through: horizon, after: now).first
+        }
+        guard let next else { return nil }
+        if let boundary = repeatEndBoundary(for: schedule), next > boundary {
+            return nil
+        }
+        return next
+    }
 
 #if os(iOS)
-            if schedule.alertDeliveryOption == .alarm {
-                await AlarmKitManager.shared.updateAlarm(
-                    for: schedule,
-                    nextFireDate: nextAlarmFireDate(for: schedule)
-                )
+    /// AlarmKit-native schedule for repeat patterns it can express directly;
+    /// nil falls back to a single fixed alarm at the next occurrence for
+    /// patterns AlarmKit can't represent (interval and monthly rules).
+    private func alarmKitSchedule(for schedule: Schedule) -> Alarm.Schedule? {
+        let calendar = Calendar.current
+        let time = Alarm.Schedule.Relative.Time(
+            hour: calendar.component(.hour, from: schedule.scheduledDate),
+            minute: calendar.component(.minute, from: schedule.scheduledDate)
+        )
+        func localeWeekdays(_ calendarWeekdays: [Int]) -> [Locale.Weekday] {
+            calendarWeekdays.compactMap {
+                switch $0 {
+                case 1: return .sunday
+                case 2: return .monday
+                case 3: return .tuesday
+                case 4: return .wednesday
+                case 5: return .thursday
+                case 6: return .friday
+                case 7: return .saturday
+                default: return nil
+                }
             }
-#endif
         }
-    }
+        func weeklyRecurrence(_ calendarWeekdays: [Int]) -> Alarm.Schedule {
+            .relative(.init(
+                time: time,
+                repeats: .weekly(localeWeekdays(calendarWeekdays))
+            ))
+        }
 
-    /// Next date the alarm should actually fire; nil when nothing is pending.
-    private func nextAlarmFireDate(for schedule: Schedule, now: Date = Date()) -> Date? {
-        if schedule.repeatPattern == .never {
-            return schedule.scheduledDate > now ? schedule.scheduledDate : nil
+        switch schedule.repeatPattern {
+        case .never:
+            return .fixed(schedule.scheduledDate)
+        case .daily:
+            // `.daily` honors repeatWeekdays the same way notifications do.
+            return weeklyRecurrence(normalizedWeekdays(schedule.repeatWeekdays))
+        case .weekdays:
+            return weeklyRecurrence([2, 3, 4, 5, 6])
+        case .weekly:
+            return weeklyRecurrence([calendar.component(.weekday, from: schedule.scheduledDate)])
+        case .customWeekdays:
+            let days = schedule.repeatWeekdays.isEmpty
+                ? [calendar.component(.weekday, from: schedule.scheduledDate)]
+                : schedule.repeatWeekdays
+            return weeklyRecurrence(days)
+        case .biweekly, .monthly, .yearly, .everyNDays, .everyNWeeks, .everyNMonths:
+            return nil
         }
-        let horizon = Calendar.current.date(byAdding: .year, value: 1, to: now)
-            ?? schedule.scheduledDate
-        return recurringOccurrences(for: schedule, through: horizon)
-            .first(where: { $0 > now })
     }
+#endif
 
     func cancelNotification(for schedule: Schedule) {
         let center = UNUserNotificationCenter.current()
@@ -1145,12 +1208,20 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         return Array(allOccurrences.prefix(boundedCount))
     }
 
-    private func recurringOccurrences(for schedule: Schedule, through endDate: Date) -> [Date] {
+    /// Occurrences from `scheduledDate` through `endDate`, capped at
+    /// `maxFiniteRepeatOccurrences`. `after` skips occurrences at or before
+    /// that date without counting them toward the cap.
+    private func recurringOccurrences(
+        for schedule: Schedule,
+        through endDate: Date,
+        after lowerBound: Date? = nil
+    ) -> [Date] {
         guard schedule.repeatPattern != .never else { return [] }
         guard schedule.scheduledDate <= endDate else { return [] }
 
         let calendar = Calendar.current
         let limit = Self.maxFiniteRepeatOccurrences
+        let floor = lowerBound ?? .distantPast
         var occurrences: [Date] = []
         occurrences.reserveCapacity(limit)
 
@@ -1172,6 +1243,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     of: day
                    ),
                    occurrence >= schedule.scheduledDate,
+                   occurrence > floor,
                    occurrence <= endDate {
                     occurrences.append(occurrence)
                 }
@@ -1204,7 +1276,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     break
                 }
 
-                if nextDate >= schedule.scheduledDate {
+                if nextDate >= schedule.scheduledDate, nextDate > floor {
                     // For interval-based patterns, verify the interval
                     var include = true
                     if schedule.repeatPattern == .biweekly {
@@ -1241,6 +1313,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     of: day
                    ),
                    occurrence >= schedule.scheduledDate,
+                   occurrence > floor,
                    occurrence <= endDate {
                     occurrences.append(occurrence)
                 }
@@ -1252,7 +1325,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             let interval = max(1, schedule.repeatInterval)
             var cursor = schedule.scheduledDate
             while cursor <= endDate, occurrences.count < limit {
-                occurrences.append(cursor)
+                if cursor > floor {
+                    occurrences.append(cursor)
+                }
                 guard let next = calendar.date(byAdding: .day, value: interval, to: cursor) else { break }
                 cursor = next
             }
@@ -1274,6 +1349,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     of: day
                    ),
                    occurrence >= schedule.scheduledDate,
+                   occurrence > floor,
                    occurrence <= endDate {
                     occurrences.append(occurrence)
                 }

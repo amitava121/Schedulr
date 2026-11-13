@@ -34,25 +34,30 @@ final class AlarmKitManager {
     private init() {}
 
     /// Reconciles the system alarm for a schedule: creates/updates it when the
-    /// schedule should ring, removes it when it shouldn't. `nextFireDate` comes
-    /// from NotificationManager's recurrence logic — pass nil to cancel.
-    func updateAlarm(for schedule: Schedule, nextFireDate: Date?) async {
+    /// schedule should ring, removes it when it shouldn't.
+    /// `alarmSchedule` is the AlarmKit-native schedule (`.relative` with
+    /// recurrence when the repeat pattern maps, `.fixed` otherwise); nil means
+    /// cancel. `nextFireDate` is used only to sanity-check that the alarm is
+    /// still pending.
+    func updateAlarm(
+        for schedule: Schedule,
+        alarmSchedule: Alarm.Schedule?,
+        nextFireDate: Date?
+    ) async {
         let manager = AlarmManager.shared
         let id = schedule.id
 
-        guard let fireDate = nextFireDate, fireDate > Date() else {
+        guard let desired = alarmSchedule,
+              let fireDate = nextFireDate, fireDate > Date() else {
             cancelAlarm(for: id)
             return
         }
 
         if let existing = currentAlarm(id: id) {
-            // Never cancel an alarm that is currently ringing.
-            if existing.state == .alerting { return }
-            // Same fire minute already registered → nothing to do.
-            if case .fixed(let existingDate) = existing.schedule,
-               Int(existingDate.timeIntervalSince1970) / 60 == Int(fireDate.timeIntervalSince1970) / 60 {
-                return
-            }
+            // Never touch an alarm that is ringing, counting down to its next
+            // ring (snooze), or paused — only replace a still-pending one.
+            guard existing.state == .scheduled else { return }
+            if existing.schedule == desired { return }
             try? manager.cancel(id: id)
         }
 
@@ -73,11 +78,14 @@ final class AlarmKitManager {
                 postAlert: TimeInterval(max(1, schedule.alarmSnoozeMinutes) * 60)
             )
             : nil
+        let sound: AlertConfiguration.AlertSound = schedule.alarmSoundOption
+            .bestAvailableBundledSoundFileName
+            .map { .named($0) } ?? .default
         let configuration = AlarmManager.AlarmConfiguration<SchedulrAlarmMetadata>(
             countdownDuration: countdown,
-            schedule: .fixed(fireDate),
+            schedule: desired,
             attributes: attributes,
-            sound: .default
+            sound: sound
         )
 
         do {
@@ -92,13 +100,14 @@ final class AlarmKitManager {
         }
     }
 
-    /// Cancels the registered system alarm unless it is currently ringing —
-    /// killing a ringing alarm would silence it without the user stopping it.
-    /// Returns early when nothing is registered so push-only schedules don't
-    /// emit `Alarm does not exist` noise in mobiletimerd.
+    /// Cancels a still-pending system alarm. Alarms that are ringing, in
+    /// snooze countdown, or paused are left alone — cancelling those would
+    /// silence an alarm the user is actively expecting. Returns early when
+    /// nothing is registered so push-only schedules don't emit
+    /// `Alarm does not exist` noise in mobiletimerd.
     func cancelAlarm(for id: UUID) {
-        guard let existing = currentAlarm(id: id) else { return }
-        if existing.state == .alerting { return }
+        guard let existing = currentAlarm(id: id),
+              existing.state == .scheduled else { return }
         try? AlarmManager.shared.cancel(id: id)
     }
 
