@@ -410,7 +410,9 @@ final class ScheduleViewModel {
     func handleRemoteScheduleChanges(_ changed: [Schedule]) {
         guard !changed.isEmpty else { return }
         for schedule in changed {
-            if schedule.isSoftDeleted {
+            // updateNotification ignores isCompleted, so a remotely completed
+            // or deleted schedule must have its alerts cancelled, not rescheduled.
+            if schedule.isSoftDeleted || schedule.isCompleted {
                 NotificationManager.shared.cancelNotification(for: schedule)
             } else {
                 NotificationManager.shared.updateNotification(for: schedule)
