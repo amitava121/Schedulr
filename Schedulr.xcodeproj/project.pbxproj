@@ -12,6 +12,7 @@
 		FBA0000200000001009600E5 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = FBA0000600000001009600E5 /* FirebaseCore */; };
 		FBA0000300000001009600E5 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = FBA0000700000001009600E5 /* FirebaseFirestore */; };
 		GSI0000100000001009600E5 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = GSI0000300000001009600E5 /* GoogleSignIn */; };
+		BB10000300000001009600E5 /* SchedulrLogic in Frameworks */ = {isa = PBXBuildFile; productRef = BB10000200000001009600E5 /* SchedulrLogic */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -72,6 +73,7 @@
 				FBA0000200000001009600E5 /* FirebaseCore in Frameworks */,
 				FBA0000300000001009600E5 /* FirebaseFirestore in Frameworks */,
 				GSI0000100000001009600E5 /* GoogleSignIn in Frameworks */,
+				BB10000300000001009600E5 /* SchedulrLogic in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -144,6 +146,7 @@
 				FBA0000600000001009600E5 /* FirebaseCore */,
 				FBA0000700000001009600E5 /* FirebaseFirestore */,
 				GSI0000300000001009600E5 /* GoogleSignIn */,
+				BB10000200000001009600E5 /* SchedulrLogic */,
 			);
 			productName = Schedulr;
 			productReference = D196823B2F366ED0009600E5 /* Schedulr.app */;
@@ -179,6 +182,7 @@
 			packageReferences = (
 				FBA0000400000001009600E5 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 				GSI0000200000001009600E5 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+				BB10000100000001009600E5 /* XCLocalSwiftPackageReference "LogicTestsPackage" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D196823C2F366ED0009600E5 /* Products */;
@@ -584,6 +588,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		BB10000100000001009600E5 /* XCLocalSwiftPackageReference "LogicTestsPackage" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = LogicTestsPackage;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		FBA0000400000001009600E5 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -623,6 +634,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = GSI0000200000001009600E5 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
 			productName = GoogleSignIn;
+		};
+		BB10000200000001009600E5 /* SchedulrLogic */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB10000100000001009600E5 /* XCLocalSwiftPackageReference "LogicTestsPackage" */;
+			productName = SchedulrLogic;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

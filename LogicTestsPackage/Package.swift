@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "SchedulrLogic",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v13),
+        .iOS(.v17)
     ],
     products: [
         .library(name: "SchedulrLogic", targets: ["SchedulrLogic"])
