@@ -14,3 +14,10 @@ DerivedData/
 # Firebase / Google service credentials
 GoogleService-Info.plist
 **/GoogleService-Info.plist
+
+# Node / Vercel
+node_modules/
+.vercel/
+.env
+.env.*
+!.env.example
