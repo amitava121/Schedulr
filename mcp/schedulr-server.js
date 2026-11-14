@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { cert, getApp, getApps, initializeApp } from 'firebase-admin/app';
 import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
 import { z } from 'zod';
 
 const WRITER_DEVICE_ID = 'mcp-server';
@@ -84,21 +85,50 @@ function requiredEnv(name) {
   return value;
 }
 
-function firestore() {
-  const projectId = requiredEnv('FIREBASE_PROJECT_ID');
-  const clientEmail = requiredEnv('FIREBASE_CLIENT_EMAIL');
-  const privateKey = requiredEnv('FIREBASE_PRIVATE_KEY').replace(/\\n/g, '\n');
-  const app = getApps().length
-    ? getApp()
-    : initializeApp({
-        credential: cert({ projectId, clientEmail, privateKey }),
-        projectId
+let cachedSchedulrUserId;
+
+function firebaseApp() {
+  if (getApps().length) return getApp();
+
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const credential = serviceAccountJson
+    ? cert(JSON.parse(serviceAccountJson))
+    : cert({
+        projectId: requiredEnv('FIREBASE_PROJECT_ID'),
+        clientEmail: requiredEnv('FIREBASE_CLIENT_EMAIL'),
+        privateKey: requiredEnv('FIREBASE_PRIVATE_KEY').replace(/\\n/g, '\n')
       });
-  return getFirestore(app, process.env.FIRESTORE_DATABASE_ID || 'schedulr');
+  return initializeApp({ credential });
 }
 
-function schedulesCollection(db) {
-  return db.collection('users').doc(requiredEnv('SCHEDULR_USER_ID')).collection('schedules');
+function firestore() {
+  return getFirestore(firebaseApp(), process.env.FIRESTORE_DATABASE_ID || 'schedulr');
+}
+
+async function schedulrUserId() {
+  if (cachedSchedulrUserId) return cachedSchedulrUserId;
+  if (process.env.SCHEDULR_USER_ID) {
+    cachedSchedulrUserId = process.env.SCHEDULR_USER_ID;
+    return cachedSchedulrUserId;
+  }
+
+  const email = process.env.SCHEDULR_USER_EMAIL;
+  if (email) {
+    cachedSchedulrUserId = (await getAuth(firebaseApp()).getUserByEmail(email)).uid;
+    return cachedSchedulrUserId;
+  }
+
+  const { users } = await getAuth(firebaseApp()).listUsers(2);
+  if (users.length === 1) {
+    cachedSchedulrUserId = users[0].uid;
+    return cachedSchedulrUserId;
+  }
+
+  throw new Error('Set SCHEDULR_USER_ID or SCHEDULR_USER_EMAIL when the Firebase project has multiple users');
+}
+
+async function schedulesCollection(db) {
+  return db.collection('users').doc(await schedulrUserId()).collection('schedules');
 }
 
 function timestampFrom(value, fieldName) {
@@ -170,14 +200,14 @@ function toolError(message) {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-function scheduleDoc(db, scheduleId) {
-  return schedulesCollection(db).doc(scheduleId);
+async function scheduleDoc(db, scheduleId) {
+  return (await schedulesCollection(db)).doc(scheduleId);
 }
 
 async function listSchedules(args) {
   const db = firestore();
   const limit = Math.min(args.limit ?? 50, 200);
-  let query = schedulesCollection(db).orderBy('scheduledDate');
+  let query = (await schedulesCollection(db)).orderBy('scheduledDate');
   if (args.start) query = query.where('scheduledDate', '>=', timestampFrom(args.start, 'start'));
   if (args.end) query = query.where('scheduledDate', '<=', timestampFrom(args.end, 'end'));
   const snapshot = await query.limit(Math.max(limit * 4, 200)).get();
@@ -196,7 +226,7 @@ async function listSchedules(args) {
 
 async function getSchedule(args) {
   const db = firestore();
-  const doc = await scheduleDoc(db, args.schedule_id).get();
+  const doc = await (await scheduleDoc(db, args.schedule_id)).get();
   if (!doc.exists) return toolError(`Schedule ${args.schedule_id} was not found.`);
   const schedule = serializeSchedule(doc);
   return textResult({ schedule }, `${schedule.title ?? 'Schedule'} — ${schedule.scheduled_at ?? 'unscheduled'}`);
@@ -243,14 +273,14 @@ async function createSchedule(args) {
     isCompleted: args.is_completed ?? false,
     priorityRaw: PRIORITY[args.priority ?? 'none']
   };
-  await scheduleDoc(db, scheduleId).set(payload);
-  const schedule = serializeSchedule(await scheduleDoc(db, scheduleId).get());
+  await (await scheduleDoc(db, scheduleId)).set(payload);
+  const schedule = serializeSchedule(await (await scheduleDoc(db, scheduleId)).get());
   return textResult({ schedule }, `Created schedule “${schedule.title}” for ${schedule.scheduled_at}.`);
 }
 
 async function updateSchedule(args) {
   const db = firestore();
-  const ref = scheduleDoc(db, args.schedule_id);
+  const ref = await scheduleDoc(db, args.schedule_id);
   const doc = await ref.get();
   if (!doc.exists) return toolError(`Schedule ${args.schedule_id} was not found.`);
 
@@ -293,7 +323,7 @@ async function updateSchedule(args) {
 
 async function deleteSchedule(args) {
   const db = firestore();
-  const ref = scheduleDoc(db, args.schedule_id);
+  const ref = await scheduleDoc(db, args.schedule_id);
   const doc = await ref.get();
   if (!doc.exists) return toolError(`Schedule ${args.schedule_id} was not found.`);
   await ref.set({
