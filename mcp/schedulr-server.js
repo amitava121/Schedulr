@@ -234,7 +234,7 @@ async function getSchedule(args) {
 
 async function createSchedule(args) {
   const db = firestore();
-  const scheduleId = randomUUID();
+  const scheduleId = randomUUID().toUpperCase();
   const now = Timestamp.now();
   const payload = {
     scheduleID: scheduleId,
