@@ -752,7 +752,11 @@ final class Schedule: ScheduleState {
     }
 
     var dateString: String {
-        ScheduleFormatters.date.string(from: scheduledDate)
+        dateString(for: scheduledDate)
+    }
+
+    func dateString(for date: Date) -> String {
+        ScheduleFormatters.date.string(from: date)
     }
 
     var hourOffset: CGFloat {

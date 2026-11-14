@@ -33,6 +33,27 @@ final class AlarmKitManager {
 
     private init() {}
 
+    private func ensureAuthorization() async -> Bool {
+        let manager = AlarmManager.shared
+        switch manager.authorizationState {
+        case .authorized:
+            return true
+        case .denied:
+            return false
+        case .notDetermined:
+            do {
+                return try await manager.requestAuthorization() == .authorized
+            } catch {
+                Self.logger.error(
+                    "AlarmKit authorization request failed: \(error.localizedDescription, privacy: .public)"
+                )
+                return false
+            }
+        @unknown default:
+            return false
+        }
+    }
+
     /// Reconciles the system alarm for a schedule: creates/updates it when the
     /// schedule should ring, removes it when it shouldn't.
     /// `alarmSchedule` is the AlarmKit-native schedule (`.relative` with
@@ -50,6 +71,13 @@ final class AlarmKitManager {
         guard let desired = alarmSchedule,
               let fireDate = nextFireDate, fireDate > Date() else {
             cancelAlarm(for: id)
+            return
+        }
+
+        guard await ensureAuthorization() else {
+            Self.logger.error(
+                "AlarmKit authorization is unavailable; system alarm not scheduled for \(id.uuidString, privacy: .public)"
+            )
             return
         }
 

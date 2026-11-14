@@ -18,8 +18,12 @@ enum SmartSuggestionsService {
     ) -> [Date] {
         var suggestions: [Date] = []
         let calendar = Calendar.current
+        let targetDate = dateFromRelativeKeywords(in: title, preferredDate: preferredDate)
 
-        // 1. Find similar schedules and suggest same time
+        // Explicit title keywords should win over generic free slots.
+        suggestions.append(contentsOf: suggestTimeFromKeywords(in: title, on: targetDate))
+
+        // Reuse the time of similar schedules when no explicit time is present.
         let similarSchedules = findSimilarSchedules(title: title, in: existingSchedules)
         let commonTimes = extractCommonTimes(from: similarSchedules)
         for time in commonTimes.prefix(2) {
@@ -27,24 +31,21 @@ enum SmartSuggestionsService {
                 bySettingHour: time.hour,
                 minute: time.minute,
                 second: 0,
-                of: preferredDate
+                of: targetDate
             ) {
                 suggestions.append(suggested)
             }
         }
 
-        // 2. Keyword-based suggestions
-        let keywordTimes = suggestTimeFromKeywords(in: title, on: preferredDate)
-        suggestions.append(contentsOf: keywordTimes)
-
-        // 3. Find free slots (gap-based)
-        let freeSlots = findFreeSlots(on: preferredDate, existingSchedules: existingSchedules)
+        // Fall back to open slots on the requested day.
+        let freeSlots = findFreeSlots(on: targetDate, existingSchedules: existingSchedules)
         suggestions.append(contentsOf: freeSlots.prefix(2))
 
-        // Deduplicate and sort
-        let unique = Array(Set(suggestions.map { calendar.dateComponents([.year, .month, .day, .hour, .minute], from: $0) }))
-            .compactMap { calendar.date(from: $0) }
-            .sorted()
+        var seen: Set<DateComponents> = []
+        let unique = suggestions.filter { date in
+            let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+            return seen.insert(components).inserted
+        }
 
         return Array(unique.prefix(5))
     }
@@ -202,6 +203,20 @@ enum SmartSuggestionsService {
             .mapValues(\.count)
             .sorted { $0.value > $1.value }
             .map(\.key)
+    }
+
+    private static func dateFromRelativeKeywords(in title: String, preferredDate: Date) -> Date {
+        let lower = title.lowercased()
+        let calendar = Calendar.current
+
+        if lower.contains("day after tomorrow") {
+            return calendar.date(byAdding: .day, value: 2, to: preferredDate) ?? preferredDate
+        }
+        if lower.contains("tomorrow") {
+            return calendar.date(byAdding: .day, value: 1, to: preferredDate) ?? preferredDate
+        }
+
+        return preferredDate
     }
 
     private static func suggestTimeFromKeywords(in title: String, on date: Date) -> [Date] {
