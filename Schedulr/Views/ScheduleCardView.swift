@@ -7,6 +7,7 @@ struct ScheduleCardView: View {
     var isCompact: Bool = true
     var showTrailingTime: Bool = true
     var completionOverride: Bool? = nil
+    var displayDate: Date? = nil
     var onTap: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
@@ -137,13 +138,8 @@ struct ScheduleCardView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if isOverdue {
-                Text("Overdue")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(AppTheme.danger)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(AppTheme.danger.opacity(0.14), in: Capsule(style: .continuous))
+            if isOverdue && isCompact {
+                overdueBadge
             }
         }
     }
@@ -177,9 +173,17 @@ struct ScheduleCardView: View {
                 }
             }
 
-            Label("\(schedule.dateString) • \(schedule.timeString)", systemImage: "calendar")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Label("\(displayDateString) • \(schedule.timeString)", systemImage: "calendar")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 8)
+
+                if isOverdue {
+                    overdueBadge
+                }
+            }
 
             HStack(spacing: 8) {
                 Label(
@@ -212,6 +216,19 @@ struct ScheduleCardView: View {
                 }
             }
         }
+    }
+
+    private var overdueBadge: some View {
+        Text("Overdue")
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(AppTheme.danger)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(AppTheme.danger.opacity(0.14), in: Capsule(style: .continuous))
+    }
+
+    private var displayDateString: String {
+        schedule.dateString(for: displayDate ?? schedule.scheduledDate)
     }
 }
 

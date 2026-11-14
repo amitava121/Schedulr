@@ -17,7 +17,7 @@ struct WeekScheduleView: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(spacing: 14) {
+            LazyVStack(spacing: 10) {
                 ForEach(viewModel.dayItems) { item in
                     if shouldShowMonthHeader(item: item) {
                         MonthChangeHeader(title: item.date.monthYearString)
@@ -55,8 +55,8 @@ struct WeekScheduleView: View {
                     )
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 18)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
         }
         .confirmationDialog(
             "Delete Repeating Schedule",
@@ -195,20 +195,34 @@ private struct DayStripRowView: View {
     var selectedScheduleIDs: Set<UUID>
     var onToggleScheduleSelection: (UUID) -> Void
 
-    private let rowShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+    private let rowShape = RoundedRectangle(cornerRadius: 20, style: .continuous)
     @State private var hasAutoScrolled = false
     @State private var autoScrollTask: Task<Void, Never>?
     @State private var isDropTargeted = false
+    @State private var isCardUnderDayOverlay = false
 
     var body: some View {
         scheduleStrip
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .leading) {
-                dayLabel
-                    .padding(.leading, 8)
+                Group {
+                    if isCardUnderDayOverlay {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: 52)
+                .allowsHitTesting(false)
             }
-            .frame(height: 102)
-            .padding(2)
+            .overlay(alignment: .leading) {
+                dayLabel
+                    .padding(.leading, 4)
+                    .padding(.vertical, 8)
+            }
+            .frame(height: 100)
+            .padding(1)
             .clipShape(rowShape)
             .background { rowSurface }
             .overlay {
@@ -241,28 +255,29 @@ private struct DayStripRowView: View {
     // MARK: Day Label
 
     private var dayLabel: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 4) {
             Text(date.shortDayName.uppercased())
-                .font(.caption.weight(.black))
-                .kerning(0.6)
+                .font(.caption2.weight(.bold))
+                .kerning(0.5)
                 .foregroundStyle(
                     date.isToday
                         ? AppTheme.accent
                         : .secondary
                 )
                 .padding(.horizontal, 6)
-                .padding(.vertical, 3)
+                .padding(.vertical, 2)
                 .background(
                     Capsule(style: .continuous)
                         .fill(AppTheme.chipFill(for: colorScheme))
                 )
 
             Text(date.dayNumber)
-                .font(.title3.weight(.heavy))
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(date.isToday ? .white : .primary)
-                .frame(width: 34, height: 34)
+                .frame(width: 32, height: 32)
                 .background { dayBadge }
         }
+        .frame(width: 52)
         .frame(maxHeight: .infinity)
     }
 
@@ -298,21 +313,30 @@ private struct DayStripRowView: View {
 
     @ViewBuilder
     private var scheduleStrip: some View {
-        ScrollViewReader { hProxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                scheduleCards
-                    .padding(.leading, 90)
-                    .padding(.trailing, 14)
-            }
-            .onAppear {
-                scheduleAutoScrollIfNeeded(using: hProxy)
-            }
-            .onChange(of: schedules.map(\.id)) { _, _ in
-                scheduleAutoScrollIfNeeded(using: hProxy)
-            }
-            .onDisappear {
-                autoScrollTask?.cancel()
-                autoScrollTask = nil
+        if schedules.isEmpty {
+            emptyScheduleStrip
+        } else {
+            ScrollViewReader { hProxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    scheduleCards
+                        .padding(.leading, 76)
+                        .padding(.trailing, 12)
+                }
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.x > 24
+                } action: { _, isUnderOverlay in
+                    isCardUnderDayOverlay = isUnderOverlay
+                }
+                .onAppear {
+                    scheduleAutoScrollIfNeeded(using: hProxy)
+                }
+                .onChange(of: schedules.map(\.id)) { _, _ in
+                    scheduleAutoScrollIfNeeded(using: hProxy)
+                }
+                .onDisappear {
+                    autoScrollTask?.cancel()
+                    autoScrollTask = nil
+                }
             }
         }
     }
@@ -333,7 +357,7 @@ private struct DayStripRowView: View {
     }
 
     private var scheduleCards: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             if schedules.isEmpty {
                 emptyScheduleStrip
             } else {
@@ -359,25 +383,19 @@ private struct DayStripRowView: View {
 
             if schedules.count <= 1 {
                 Color.clear
-                    .frame(width: 140, height: 1)
+                    .frame(width: 104, height: 1)
                     .accessibilityHidden(true)
             }
         }
     }
 
     private var emptyScheduleStrip: some View {
-        Text("No schedules")
-            .font(.caption.weight(.semibold))
+        Text("No schedule")
+            .font(.footnote.weight(.medium))
             .foregroundStyle(.secondary)
-            .frame(width: 186, height: 72)
-            .background(
-                AppTheme.surfaceSecondary(for: colorScheme)
-                    .opacity(colorScheme == .dark ? 0.52 : 0.64),
-                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(AppTheme.borderSoft(for: colorScheme), lineWidth: 1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .onAppear {
+                isCardUnderDayOverlay = false
             }
     }
 
@@ -386,21 +404,9 @@ private struct DayStripRowView: View {
     private var rowSurface: some View {
         rowShape
             .fill(
-                LinearGradient(
-                    colors: [
-                        AppTheme.surfaceSecondary(for: colorScheme)
-                            .opacity(colorScheme == .dark ? 0.56 : 0.68),
-                        AppTheme.surfaceTertiary(for: colorScheme)
-                            .opacity(colorScheme == .dark ? 0.48 : 0.60)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .shadow(
-                color: AppTheme.cardShadow(for: colorScheme),
-                radius: 8,
-                y: 3
+                date.isToday
+                    ? AppTheme.accentSoft.opacity(0.20)
+                    : AppTheme.surfacePrimary(for: colorScheme)
             )
     }
 
@@ -409,8 +415,10 @@ private struct DayStripRowView: View {
     private var rowBorder: some View {
         rowShape
             .strokeBorder(
-                AppTheme.borderStrong(for: colorScheme),
-                lineWidth: colorScheme == .dark ? 0.7 : 0.8
+                date.isToday
+                    ? AppTheme.accent.opacity(0.30)
+                    : AppTheme.borderSoft(for: colorScheme),
+                lineWidth: date.isToday ? 1.0 : 0.7
             )
     }
 }
@@ -432,77 +440,101 @@ private struct ScheduleStripCardView: View {
     var onToggleSelected: () -> Void
     let dragPayload: String
 
-    private let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+    private let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(schedule.title)
-                        .font(.subheadline.weight(.heavy))
-                        .foregroundStyle(isCompleted ? .secondary : .primary)
-                        .strikethrough(isCompleted, color: .secondary)
-                        .lineLimit(1)
-
-                    HStack(spacing: 6) {
-                        Text(schedule.timeString)
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-
-                        if schedule.isUrgent {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.caption2)
-                                .foregroundStyle(AppTheme.danger)
-                                .symbolRenderingMode(.hierarchical)
-                        }
-
-                        if schedule.isFlagged {
-                            Image(systemName: "flag.fill")
-                                .font(.caption2)
-                                .foregroundStyle(AppTheme.warning)
-                        }
-                    }
-                }
+        ZStack(alignment: .topTrailing) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(schedule.title)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(isCompleted ? .secondary : .primary)
+                    .strikethrough(isCompleted, color: .secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .lineSpacing(-2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: 30,
+                        maxHeight: 30,
+                        alignment: .topLeading
+                    )
+                    .padding(.trailing, 56)
 
                 Spacer(minLength: 0)
 
-                HStack(spacing: 6) {
-                    if isSelectionMode {
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(isSelected ? AppTheme.accent : .secondary)
-                            .frame(width: 24, height: 24)
-                    } else {
-                        Button {
-                            onToggleComplete()
-                        } label: {
-                            Image(systemName: isCompleted ? "checkmark.circle.fill" : "checkmark.circle")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(isCompleted ? AppTheme.success : .primary)
-                                .frame(width: 24, height: 24)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(isCompleted ? "Mark incomplete" : "Mark complete")
+                HStack(spacing: 5) {
+                    Text(schedule.timeString)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
 
-                        Button {
-                            onEdit()
-                        } label: {
-                            Image(systemName: "pencil")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.primary)
-                                .frame(width: 24, height: 24)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Edit schedule")
+                    if schedule.isUrgent {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.danger)
+                            .symbolRenderingMode(.hierarchical)
+                    }
+
+                    if schedule.priority != .none {
+                        Image(systemName: schedule.priority.iconName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(schedule.priority.tintColor)
+                            .accessibilityLabel("Priority \(schedule.priority.displayName)")
+                    }
+
+                    if let earlyReminderMinutes = schedule.earlyReminderMinutes {
+                        Image(systemName: "bell.badge")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Reminder \(earlyReminderMinutes) minutes early")
+                    }
+
+                    if schedule.isFlagged {
+                        Image(systemName: "flag.fill")
+                            .font(.caption2)
+                            .foregroundStyle(AppTheme.warning)
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            HStack(spacing: 6) {
+                if isSelectionMode {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(isSelected ? AppTheme.accent : .secondary)
+                        .frame(width: 24, height: 24)
+                } else {
+                    Button {
+                        onToggleComplete()
+                    } label: {
+                        Image(systemName: isCompleted ? "checkmark.circle.fill" : "checkmark.circle")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(isCompleted ? AppTheme.success : .primary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isCompleted ? "Mark incomplete" : "Mark complete")
+
+                    Button {
+                        onEdit()
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit schedule")
+                }
+            }
+            .offset(x: 4, y: -4)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(width: 186, height: 72, alignment: .leading)
+        .frame(width: 176, height: 80, alignment: .topLeading)
         .background(
             cardShape.fill(
                 AppTheme.stackCardGradient(
@@ -548,12 +580,11 @@ private struct ScheduleStripCardView: View {
                             priority: schedule.priority,
                             completed: isCompleted
                         ),
-                        lineWidth: 1.0
+                        lineWidth: 0.8
                     )
             }
             .allowsHitTesting(false)
         }
-        .shadow(color: AppTheme.cardShadow(for: colorScheme), radius: 7, y: 3)
         .contentShape(cardShape)
         .onTapGesture {
             if isSelectionMode {

@@ -225,6 +225,12 @@ struct ScheduleFormView: View {
                 .buttonStyle(.bordered)
                 .disabled(formVM.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
+                if let smartSuggestionsStatusMessage = formVM.smartSuggestionsStatusMessage {
+                    Text(smartSuggestionsStatusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 inputField(
                     "Notes",
                     text: $formVM.notes,

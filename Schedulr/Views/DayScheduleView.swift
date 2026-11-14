@@ -88,53 +88,60 @@ struct DayScheduleView: View {
     private var dayHeader: some View {
         let cardShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
 
-        return HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
                 Text(viewModel.selectedDate.fullDayString)
                     .font(.headline.weight(.bold))
                     .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .layoutPriority(1)
 
+                Spacer(minLength: 8)
+
+                HStack(spacing: 8) {
+                    Button {
+                        viewModel.performUndo()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.subheadline.weight(.bold))
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!viewModel.canUndo)
+                    .accessibilityLabel(viewModel.undoActionName.map { "Undo \($0)" } ?? "Undo")
+
+                    Button {
+                        viewModel.performRedo()
+                    } label: {
+                        Image(systemName: "arrow.uturn.forward")
+                            .font(.subheadline.weight(.bold))
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!viewModel.canRedo)
+                    .accessibilityLabel(viewModel.redoActionName.map { "Redo \($0)" } ?? "Redo")
+                }
+            }
+
+            HStack(alignment: .center, spacing: 12) {
                 Text("\(daySchedules.count) routine\(daySchedules.count == 1 ? "" : "s")")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
-            }
+                    .lineLimit(1)
 
-            Spacer()
-
-            HStack(spacing: 8) {
-                Button {
-                    viewModel.performUndo()
-                } label: {
-                    Image(systemName: "arrow.uturn.backward")
-                        .font(.subheadline.weight(.bold))
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-                .disabled(!viewModel.canUndo)
-                .accessibilityLabel(viewModel.undoActionName.map { "Undo \($0)" } ?? "Undo")
+                Spacer(minLength: 8)
 
                 Button {
-                    viewModel.performRedo()
+                    addScheduleForSelectedDay()
                 } label: {
-                    Image(systemName: "arrow.uturn.forward")
+                    Label("Add", systemImage: "plus")
                         .font(.subheadline.weight(.bold))
-                        .frame(width: 30, height: 30)
                 }
-                .buttonStyle(.plain)
-                .disabled(!viewModel.canRedo)
-                .accessibilityLabel(viewModel.redoActionName.map { "Redo \($0)" } ?? "Redo")
+                .buttonStyle(.glass)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
             }
-
-            Button {
-                addScheduleForSelectedDay()
-            } label: {
-                Label("Add", systemImage: "plus")
-                    .font(.subheadline.weight(.bold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(.primary)
-            }
-            .buttonStyle(LiquidGlassCapsuleButtonStyle())
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -237,7 +244,7 @@ private struct RoutineStackRow: View {
     @State private var isDropTargeted = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 6) {
             timelineMarker
 
             cardWithActionsWithPreview
@@ -307,6 +314,7 @@ private struct RoutineStackRow: View {
                 isCompact: false,
                 showTrailingTime: false,
                 completionOverride: isCompleted,
+                displayDate: occurrenceDate,
                 onTap: nil,
                 onDelete: nil
             )
@@ -343,30 +351,28 @@ private struct RoutineStackRow: View {
     }
 
     private var timelineMarker: some View {
-        VStack(spacing: 6) {
-            Text(schedule.timeString)
-                .font(.caption2.weight(.heavy))
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(AppTheme.surfaceTertiary(for: colorScheme), in: Capsule(style: .continuous))
-
-            Circle()
-                .fill(isCompleted ? AppTheme.success : AppTheme.mutedTimeline(for: colorScheme))
-                .frame(width: 10, height: 10)
-
-            if index < totalCount - 1 {
-                Capsule(style: .continuous)
-                    .fill(
-                        hasScheduleTimePassed
-                            ? AppTheme.success.opacity(0.42)
-                            : AppTheme.mutedTimeline(for: colorScheme).opacity(0.28)
-                    )
-                    .frame(width: 2, height: 78)
-                    .padding(.top, 2)
+        Text(schedule.timeString)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(AppTheme.chipFill(for: colorScheme), in: Capsule(style: .continuous))
+            .frame(width: 62, alignment: .leading)
+            .overlay(alignment: .topLeading) {
+                if index < totalCount - 1 {
+                    Capsule(style: .continuous)
+                        .fill(
+                            hasScheduleTimePassed
+                                ? AppTheme.success.opacity(0.42)
+                                : AppTheme.mutedTimeline(for: colorScheme).opacity(0.28)
+                        )
+                        .frame(width: 2, height: 78)
+                        .offset(x: 27, y: 24)
+                }
             }
-        }
-        .frame(width: 56)
+            .zIndex(1)
     }
 
     private var hasScheduleTimePassed: Bool {

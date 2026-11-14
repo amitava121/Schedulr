@@ -113,21 +113,12 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 return
             }
 
+            guard settings.authorizationStatus != .denied else {
 #if os(iOS)
-            // AlarmKit has its own authorization; register system alarms even
-            // when notification access is denied.
-            if schedule.alertDeliveryOption == .alarm {
-                let nextFireDate = nextAlarmFireDate(for: schedule)
-                await AlarmKitManager.shared.updateAlarm(
-                    for: schedule,
-                    alarmSchedule: alarmKitSchedule(for: schedule, nextFireDate: nextFireDate)
-                        ?? nextFireDate.map { .fixed($0) },
-                    nextFireDate: nextFireDate
-                )
-            }
+                await reconcileSystemAlarm(for: schedule)
 #endif
-
-            guard settings.authorizationStatus != .denied else { return }
+                return
+            }
 
             if authorized || settings.authorizationStatus == .notDetermined {
                 // Always schedule local notifications — they are the reliable backbone.
@@ -157,8 +148,28 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                     }
                 }
             }
+
+#if os(iOS)
+            await reconcileSystemAlarm(for: schedule)
+#endif
         }
     }
+
+#if os(iOS)
+    /// Registers the system alarm after local reminders so an AlarmKit
+    /// authorization prompt cannot delay notification delivery.
+    private func reconcileSystemAlarm(for schedule: Schedule) async {
+        guard schedule.alertDeliveryOption == .alarm else { return }
+
+        let nextFireDate = nextAlarmFireDate(for: schedule)
+        await AlarmKitManager.shared.updateAlarm(
+            for: schedule,
+            alarmSchedule: alarmKitSchedule(for: schedule, nextFireDate: nextFireDate)
+                ?? nextFireDate.map { .fixed($0) },
+            nextFireDate: nextFireDate
+        )
+    }
+#endif
 
     /// Next date the alarm should actually fire; nil when nothing is pending
     /// or the repeat series has already ended.

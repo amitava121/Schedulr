@@ -46,6 +46,7 @@ final class ScheduleFormViewModel {
     var nlpInput: String = ""
     var showNLPMode: Bool = false
     var nlpStatusMessage: String?
+    var smartSuggestionsStatusMessage: String?
     var conflictWarnings: [Schedule] = []
 
     var isEditing: Bool = false
@@ -440,30 +441,43 @@ final class ScheduleFormViewModel {
             existingSchedules: existingSchedules,
             preferredDate: normalizedSelectedDate
         )
+        let minimumDate = Self.minimumSchedulableDate()
+        var appliedSuggestions: [String] = []
 
-        if let firstSuggestedTime = suggestions.suggestedTimes.first {
-            let suggestedDate = Self.normalizedScheduleDate(firstSuggestedTime)
-            if suggestedDate >= Self.minimumSchedulableDate() {
-                scheduledDate = suggestedDate
-            }
+        if let suggestedDate = suggestions.suggestedTimes
+            .map(Self.normalizedScheduleDate)
+            .first(where: { $0 >= minimumDate })
+        {
+            scheduledDate = suggestedDate
+            appliedSuggestions.append("time")
         }
 
         if suggestions.suggestedPriority != .none {
             priority = suggestions.suggestedPriority
+            appliedSuggestions.append("priority")
         }
 
         if repeatPattern == .never && suggestions.suggestedRepeatPattern != .never {
             repeatPattern = suggestions.suggestedRepeatPattern
+            appliedSuggestions.append("repeat")
         }
 
         if let suggestedCalendar = suggestions.suggestedCalendar,
            availableCalendars.contains(suggestedCalendar)
         {
             listName = suggestedCalendar
+            appliedSuggestions.append("calendar")
         }
 
         let uniqueSuggestedTags = suggestions.suggestedTags.filter { !tags.contains($0) }
         tags.append(contentsOf: uniqueSuggestedTags)
+        if !uniqueSuggestedTags.isEmpty {
+            appliedSuggestions.append("tags")
+        }
+
+        smartSuggestionsStatusMessage = appliedSuggestions.isEmpty
+            ? "No suggestions found for this title."
+            : "Applied: \(appliedSuggestions.joined(separator: ", "))."
     }
 
     // MARK: - Conflict Detection

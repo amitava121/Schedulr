@@ -479,7 +479,12 @@ struct ContentView: View {
     @ViewBuilder
     private func scheduleScaffold<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         ZStack {
+#if os(iOS)
+            Color(uiColor: .systemGroupedBackground)
+                .ignoresSafeArea()
+#else
             PremiumAppBackground()
+#endif
             content()
 
             let hasClipboardContent = pasteboardManager.hasQuickAddContent
@@ -537,22 +542,24 @@ struct ContentView: View {
                     .background {
                         if naturalLanguageEnabled && hasClipboardContent {
                             Capsule(style: .continuous)
-                                .fill(AppTheme.accent)
+                                .fill(.clear)
+                                .glassEffect(
+                                    .regular
+                                        .tint(AppTheme.accent)
+                                        .interactive(),
+                                    in: Capsule(style: .continuous)
+                                )
                         } else {
                             Circle()
-                                .fill(AppTheme.accent)
+                                .fill(.clear)
+                                .glassEffect(
+                                    .regular
+                                        .tint(AppTheme.accent)
+                                        .interactive(),
+                                    in: Circle()
+                                )
                         }
                     }
-                    .overlay {
-                        if naturalLanguageEnabled && hasClipboardContent {
-                            Capsule(style: .continuous)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                        } else {
-                            Circle()
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                        }
-                    }
-                    .shadow(color: AppTheme.accent.opacity(0.35), radius: 8, y: 4)
                     .contentShape(Rectangle())
                     .position(quickAddButtonPosition ?? defaultQuickAddButtonPosition(in: proxy.size))
                     .onAppear {
@@ -814,37 +821,50 @@ struct ContentView: View {
     }
 
     private var bulkActionBar: some View {
-        HStack(spacing: 10) {
-            Text("\(viewModel.selectedScheduleIDs.count) selected")
+        let hasSelection = !viewModel.selectedScheduleIDs.isEmpty
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+
+        return VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Label("\(viewModel.selectedScheduleIDs.count) selected", systemImage: "checklist")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button("Cancel") {
+                    viewModel.clearBulkSelection()
+                }
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Button("Complete") {
-                viewModel.markSelectedSchedulesCompleted(on: viewModel.selectedDate)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.selectedScheduleIDs.isEmpty)
 
-            Button("Delete", role: .destructive) {
-                viewModel.deleteSelectedSchedules()
-            }
-            .buttonStyle(.bordered)
-            .disabled(viewModel.selectedScheduleIDs.isEmpty)
+            HStack(spacing: 12) {
+                Button {
+                    viewModel.markSelectedSchedulesCompleted(on: viewModel.selectedDate)
+                } label: {
+                    Label("Complete", systemImage: "checkmark.circle.fill")
+                        .frame(maxWidth: .infinity)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!hasSelection)
 
-            Button("Cancel") {
-                viewModel.clearBulkSelection()
+                Button(role: .destructive) {
+                    viewModel.deleteSelectedSchedules()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .controlSize(.large)
+                .disabled(!hasSelection)
             }
-            .buttonStyle(.bordered)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(AppTheme.borderSoft(for: .light), lineWidth: 1)
-        }
+        .padding(16)
+        .glassEffect(.regular, in: shape)
     }
 
     private var weekCalendarSheet: some View {
