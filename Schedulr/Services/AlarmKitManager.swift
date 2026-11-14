@@ -27,7 +27,7 @@ final class AlarmKitManager {
 
     private static let snoozeButton = AlarmButton(
         text: "Snooze",
-        textColor: .orange,
+        textColor: .white,
         systemImageName: "zzz"
     )
 
