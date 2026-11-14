@@ -210,7 +210,7 @@ async function listSchedules(args) {
   let query = (await schedulesCollection(db)).orderBy('scheduledDate');
   if (args.start) query = query.where('scheduledDate', '>=', timestampFrom(args.start, 'start'));
   if (args.end) query = query.where('scheduledDate', '<=', timestampFrom(args.end, 'end'));
-  const snapshot = await query.limit(Math.max(limit * 4, 200)).get();
+  const snapshot = await query.get();
   const schedules = snapshot.docs
     .map(serializeSchedule)
     .filter((schedule) => args.include_deleted || !schedule.is_soft_deleted)
