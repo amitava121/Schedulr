@@ -313,6 +313,7 @@ private struct RoutineStackRow: View {
                 schedule: schedule,
                 isCompact: false,
                 showTrailingTime: false,
+                headerTrailingPadding: 76,
                 completionOverride: isCompleted,
                 displayDate: occurrenceDate,
                 onTap: nil,

@@ -1,11 +1,13 @@
 import SwiftUI
 import SchedulrLogic
+import UIKit
 
 struct ScheduleCardView: View {
     @Environment(\.colorScheme) private var colorScheme
     let schedule: Schedule
     var isCompact: Bool = true
     var showTrailingTime: Bool = true
+    var headerTrailingPadding: CGFloat = 0
     var completionOverride: Bool? = nil
     var displayDate: Date? = nil
     var onTap: (() -> Void)? = nil
@@ -118,11 +120,20 @@ struct ScheduleCardView: View {
                     .symbolRenderingMode(.hierarchical)
             }
 
-            Text(schedule.title)
-                .font(isCompact ? .caption.weight(.semibold) : .subheadline.weight(.heavy))
-                .foregroundStyle(isEffectivelyCompleted ? .secondary : .primary)
-                .strikethrough(isEffectivelyCompleted, color: .secondary)
-                .lineLimit(isCompact ? 1 : 2)
+            if isCompact {
+                Text(schedule.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isEffectivelyCompleted ? .secondary : .primary)
+                    .strikethrough(isEffectivelyCompleted, color: .secondary)
+                    .lineLimit(1)
+            } else {
+                FirstLineInsetTitle(
+                    title: schedule.title,
+                    trailingInset: headerTrailingPadding,
+                    isCompleted: isEffectivelyCompleted
+                )
+                .fixedSize(horizontal: false, vertical: true)
+            }
 
             Spacer(minLength: 0)
 
@@ -229,6 +240,91 @@ struct ScheduleCardView: View {
 
     private var displayDateString: String {
         schedule.dateString(for: displayDate ?? schedule.scheduledDate)
+    }
+}
+
+private struct FirstLineInsetTitle: UIViewRepresentable {
+    let title: String
+    let trailingInset: CGFloat
+    let isCompleted: Bool
+
+    func makeUIView(context: Context) -> FirstLineExclusionTextView {
+        let textView = FirstLineExclusionTextView()
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.isScrollEnabled = false
+        textView.isUserInteractionEnabled = false
+        textView.backgroundColor = .clear
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.lineBreakMode = .byWordWrapping
+        textView.textContainer.maximumNumberOfLines = 0
+        textView.textContainer.widthTracksTextView = true
+        textView.dataDetectorTypes = []
+        textView.accessibilityTraits = .staticText
+        return textView
+    }
+
+    func updateUIView(_ textView: FirstLineExclusionTextView, context: Context) {
+        let pointSize = UIFont.preferredFont(forTextStyle: .subheadline).pointSize
+        let font = UIFont.systemFont(ofSize: pointSize, weight: .heavy)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: isCompleted ? UIColor.secondaryLabel : UIColor.label,
+            .strikethroughStyle: isCompleted ? NSUnderlineStyle.single.rawValue : 0,
+            .strikethroughColor: UIColor.secondaryLabel
+        ]
+
+        textView.trailingInset = trailingInset
+        textView.font = font
+        textView.attributedText = NSAttributedString(string: title, attributes: attributes)
+        textView.accessibilityLabel = title
+        textView.updateExclusion()
+        textView.invalidateIntrinsicContentSize()
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: FirstLineExclusionTextView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width else { return nil }
+        uiView.updateExclusion(width: width)
+        let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: size.height)
+    }
+}
+
+private final class FirstLineExclusionTextView: UITextView {
+    var trailingInset: CGFloat = 0 {
+        didSet {
+            setNeedsLayout()
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    override func layoutSubviews() {
+        updateExclusion()
+        super.layoutSubviews()
+    }
+
+    func updateExclusion(width: CGFloat? = nil) {
+        let availableWidth = width ?? bounds.width
+        guard availableWidth.isFinite, availableWidth > 0 else { return }
+
+        guard trailingInset > 0 else {
+            textContainer.exclusionPaths = []
+            return
+        }
+
+        let firstLineHeight = max(1, (font?.lineHeight ?? 20) - 1)
+        let exclusion = CGRect(
+            x: availableWidth - trailingInset,
+            y: 0,
+            width: trailingInset,
+            height: firstLineHeight
+        )
+        textContainer.exclusionPaths = [UIBezierPath(rect: exclusion)]
     }
 }
 

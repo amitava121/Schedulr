@@ -25,9 +25,10 @@ final class AlarmKitManager {
         category: "AlarmKit"
     )
 
+    private static let alarmPresentationVersion = 2
     private static let snoozeButton = AlarmButton(
         text: "Snooze",
-        textColor: .orange,
+        textColor: .white,
         systemImageName: "zzz"
     )
 
@@ -176,7 +177,7 @@ final class AlarmKitManager {
     /// alarm, including across launches.
     private func configFingerprint(for schedule: Schedule) -> String {
         let sound = schedule.alarmSoundOption.bestAvailableBundledSoundFileName ?? "default"
-        return "\(schedule.title)|snooze=\(schedule.alarmSnoozeEnabled)|mins=\(schedule.alarmSnoozeMinutes)|sound=\(sound)"
+        return "\(schedule.title)|presentation=\(Self.alarmPresentationVersion)|snooze=\(schedule.alarmSnoozeEnabled)|mins=\(schedule.alarmSnoozeMinutes)|sound=\(sound)"
     }
 
     private static func fingerprintKey(for id: UUID) -> String {
