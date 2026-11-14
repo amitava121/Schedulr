@@ -6,6 +6,7 @@ struct ScheduleCardView: View {
     let schedule: Schedule
     var isCompact: Bool = true
     var showTrailingTime: Bool = true
+    var headerTrailingPadding: CGFloat = 0
     var completionOverride: Bool? = nil
     var displayDate: Date? = nil
     var onTap: (() -> Void)? = nil
@@ -122,7 +123,8 @@ struct ScheduleCardView: View {
                 .font(isCompact ? .caption.weight(.semibold) : .subheadline.weight(.heavy))
                 .foregroundStyle(isEffectivelyCompleted ? .secondary : .primary)
                 .strikethrough(isEffectivelyCompleted, color: .secondary)
-                .lineLimit(isCompact ? 1 : 2)
+                .lineLimit(isCompact ? 1 : nil)
+                .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 0)
 
@@ -142,6 +144,7 @@ struct ScheduleCardView: View {
                 overdueBadge
             }
         }
+        .padding(.trailing, headerTrailingPadding)
     }
 
     // MARK: - Details
